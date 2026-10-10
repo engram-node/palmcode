@@ -1,0 +1,29 @@
+[versions]
+# Pinned at M0 (2026-10-10). See docs/decisions/0002-toolchain-pins.md.
+agp = "9.4.0"
+kotlin = "2.4.21"           # compose compiler plugin only; AGP 9 has built-in Kotlin
+# 2026.09.00+ pulls compose 1.12 androidx libs compiled against API 37
+# (Android 17, still beta); we stay on the last API-36-compatible BOM (ADR 0002).
+compose-bom = "2026.06.00"
+activity-compose = "1.11.0"
+lifecycle = "2.9.4"
+core-ktx = "1.17.0"
+jna = "5.19.1"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+
+[libraries]
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
+lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
+# UniFFI Kotlin bindings call into Rust through JNA. Apache-2.0/LGPL-2.1 dual
+# license; we use the Apache-2.0 option. The "@aar" classifier is required for
+# the Android native dispatch library.
+jna-android = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }

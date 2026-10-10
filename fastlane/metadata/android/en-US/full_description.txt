@@ -1,0 +1,18 @@
+pocket is a coding-agent harness that runs entirely on your phone.
+
+Point it at any OpenAI-compatible endpoint with your own API key: a hosted
+model, or a llama.cpp / vLLM / Ollama server on your LAN or Tailscale.
+Sessions, repos, files, shell execution, API keys, and history never leave
+the device. There is no backend, no account, no telemetry, and no crash
+reporting.
+
+<b>Agent:</b> streaming sessions, file tools (read/write/edit/patch), bash
+with a real busybox userland, ripgrep, plan/build modes, subagents, context
+compaction, rules files, custom commands, and undo — comparable to desktop
+agent harnesses.
+
+<b>Permissions:</b> every write and command can be gated allow/ask/deny, in
+the app or from a notification.
+
+<b>Open source:</b> GPL-3.0, built for F-Droid from source only — the included
+busybox/git userland is compiled from upstream releases during the build.

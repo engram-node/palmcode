@@ -1,0 +1,7 @@
+# Offline-capable builds: crates are vendored under core/vendor (committed).
+# cargo-ndk inherits this config when run with the workspace as CWD.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

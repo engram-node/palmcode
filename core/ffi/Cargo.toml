@@ -1,0 +1,24 @@
+[package]
+name = "pocket-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "pocketffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+uniffi = "0.32.2"
+
+[features]
+# Bindgen CLI: used by the Gradle build to generate Kotlin bindings after
+# the cdylib is compiled.
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
