@@ -1,0 +1,25 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+.kotlin/
+captures/
+
+# Rust
+core/target/
+**/*.rs.bk
+
+# Generated native libs and bindings
+android/app/src/main/jniLibs/
+android/app/src/main/kotlin/dev/pocket/core/generated/
+
+# Userland build artifacts
+userland/.cache/
+userland/dist/
+userland/src/
+
+# OS
+Thumbs.db
+.DS_Store

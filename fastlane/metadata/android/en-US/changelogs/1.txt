@@ -1,0 +1,2 @@
+Initial milestone-0 skeleton: Rust core + Compose shell, FFI and exec spike.
+Not yet functional as an agent.

@@ -1,0 +1,49 @@
+# Draft fdroiddata metadata for dev.pocket.
+# NOT validated with fdroidserver yet — finalized in M5 once the userland
+# build exists (srclib-free: everything is built in-tree from pinned sources).
+
+Categories:
+  - Development
+License: GPL-3.0-only
+AuthorName: pocket contributors
+WebSite: https://github.com/OWNER/pocket
+SourceCode: https://github.com/OWNER/pocket
+IssueTracker: https://github.com/OWNER/pocket/issues
+Changelog: https://github.com/OWNER/pocket/releases
+
+AutoName: pocket
+Summary: On-device coding agent; your keys, your models, your data stays local
+Description: |
+    pocket is a coding-agent harness that runs entirely on your phone. Point it
+    at any OpenAI-compatible endpoint (OpenAI, OpenRouter, DeepSeek, a local
+    llama.cpp/vLLM/Ollama server, ...) with your own API key. Sessions, repos,
+    files, shell execution, and keys never leave the device. No accounts, no
+    telemetry, no crash reporting.
+
+RepoType: git
+Repo: https://github.com/OWNER/pocket
+
+Builds:
+  - versionName: 0.1.0
+    versionCode: 1
+    commit: v0.1.0
+    subdir: android? # TODO(M5): confirm module path handling; root gradle build drives everything
+    gradle:
+      - yes
+    # TODO(M5): pin fdroid-compatible rustup/cargo-ndk/ndk provisioning here,
+    # e.g. prebuild scripts installing the exact pinned toolchain from
+    # docs/decisions/0002-toolchain-pins.md. Everything the build downloads
+    # must be pinned+hashed (rustup dist, cargo vendor is committed).
+    sudo: |
+      # TODO(M5): jdk21 package name in the fdroid build image
+      true
+    prebuild: |
+      # TODO(M5): install rustup 1.99.0 + targets, cargo-ndk 4.1.2, run
+      # userland/build.sh prerequisites
+      true
+    ndk: 30.0.16248370
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 0.1.0
+CurrentVersionCode: 1
