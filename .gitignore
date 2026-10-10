@@ -1,6 +1,8 @@
 # Android / Gradle
 .gradle/
 **/build/
+# ...except vendored crates, where `build/` is upstream build-script source
+!core/vendor/**/build/
 local.properties
 *.iml
 .idea/

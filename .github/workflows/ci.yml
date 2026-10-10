@@ -34,10 +34,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install SDK components (pinned versions)
-        run: yes | sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
+      - name: Install SDK components (pinned versions; SDK is preinstalled on ubuntu-24.04)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
       - name: Rust toolchain (pinned, mirrors rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
