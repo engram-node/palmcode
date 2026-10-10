@@ -1,4 +1,4 @@
-package dev.pocket.app
+package dev.palmcode.app
 
 import android.content.Context
 import android.system.Os

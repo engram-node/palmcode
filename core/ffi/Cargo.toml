@@ -1,5 +1,5 @@
 [package]
-name = "pocket-ffi"
+name = "palmcode-ffi"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [lib]
-name = "pocketffi"
+name = "palmcode_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

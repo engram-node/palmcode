@@ -1,4 +1,4 @@
-pocket is a coding-agent harness that runs entirely on your phone.
+palmcode is a coding-agent harness that runs entirely on your phone.
 
 Point it at any OpenAI-compatible endpoint with your own API key: a hosted
 model, or a llama.cpp / vLLM / Ollama server on your LAN or Tailscale.

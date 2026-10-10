@@ -31,7 +31,7 @@ Rooted devices:
 adb shell su 0 setprop persist.sys.fflag.override.settings_enable_monitor_phantom_procs false
 ```
 
-pocket additionally caps concurrent child processes (default 4) and reaps
+palmcode additionally caps concurrent child processes (default 4) and reaps
 aggressively.
 
 ## "exec failed: EACCES (Permission denied)" from the bash tool (M3+)
@@ -39,9 +39,23 @@ aggressively.
 Binaries must be shipped as `lib<name>.so` and require
 `packaging.jniLibs.useLegacyPackaging=true`. If this regresses after an AGP
 bump, check that install-time extraction still happens
-(`run-as dev.pocket ls -l <nativeLibraryDir>` in a debug build).
+(`run-as dev.palmcode ls -l <nativeLibraryDir>` in a debug build).
 
 ## TLS errors to self-hosted endpoints
 
-pocket uses the platform trust store. Install your private CA via Android
+palmcode uses the platform trust store. Install your private CA via Android
 settings; user CAs are honored for apps that trust them (we do; M1).
+
+## cargo: "listed checksum of core/vendor/... has changed" (Windows checkouts)
+
+Cause: git line-ending normalization altering vendored bytes. Each vendored
+crates carries a `.cargo-checksum.json` keyed to the *published* bytes, and
+some upstream files contain CRLF. If git checks those files out as LF (e.g.
+`core.autocrlf=true` on Windows, or a global `* text=auto` rule), the bytes
+change and cargo aborts.
+
+Fix in this repo (already applied): `.gitattributes` pins
+`core/vendor/** -text` so vendored content round-trips byte-identically on
+every OS. If you add another vendored tree, add its own `-text` rule, and
+leave `core.autocrlf` unset for this repo (`git config core.autocrlf false`
+locally if you keep it `true` globally).

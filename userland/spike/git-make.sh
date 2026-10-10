@@ -19,7 +19,7 @@ gitconf() {
 }
 
 echo "=== arm64: reuse configured tree ==="
-cd ~/pocket-spike/git-2.56.0
+cd ~/palmcode-spike/git-2.56.0
 cat > config.mak <<'EOF'
 HAVE_DEV_TTY=YesPlease
 # git 2.56 builds its optional Rust component by default (needs a working
@@ -33,9 +33,9 @@ make -j"$(nproc)" git 2>&1 | tail -4
 ls -la git && file git
 
 echo "=== x86_64: fresh extract ==="
-X=~/pocket-spike/git-x86_64
+X=~/palmcode-spike/git-x86_64
 rm -rf "$X"; mkdir -p "$X"
-tar -C "$X" --strip-components=1 -xf ~/pocket-spike/git.tar.xz
+tar -C "$X" --strip-components=1 -xf ~/palmcode-spike/git.tar.xz
 cd "$X"
 gitconf x86_64-linux-android
 cat > config.mak <<'EOF'

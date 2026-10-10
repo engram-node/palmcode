@@ -15,7 +15,7 @@ core/target/
 
 # Generated native libs and bindings
 android/app/src/main/jniLibs/
-android/app/src/main/kotlin/dev/pocket/core/generated/
+android/app/src/main/kotlin/dev/palmcode/core/generated/
 
 # Userland build artifacts
 userland/.cache/
@@ -25,3 +25,6 @@ userland/src/
 # OS
 Thumbs.db
 .DS_Store
+
+# LLM SSE traces (may contain provider-specific shapes; never commit)
+traces/

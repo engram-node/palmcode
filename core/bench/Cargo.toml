@@ -1,5 +1,5 @@
 [package]
-name = "pocket-bench"
+name = "palmcode-bench"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

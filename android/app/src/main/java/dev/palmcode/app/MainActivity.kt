@@ -1,4 +1,4 @@
-package dev.pocket.app
+package dev.palmcode.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -22,15 +22,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import dev.pocket.app.ui.theme.PocketTheme
-import dev.pocket.core.pocketCoreVersion
-import dev.pocket.core.pocketGreet
+import dev.palmcode.app.ui.theme.PalmcodeTheme
+import dev.palmcode.core.palmcodeCoreVersion
+import dev.palmcode.core.palmcodeGreet
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            PocketTheme {
+            PalmcodeTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     HomeScreen()
                 }
@@ -50,10 +50,10 @@ fun HomeScreen() {
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
-        Text("pocket", style = MaterialTheme.typography.headlineLarge)
+        Text("palmcode", style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(8.dp))
-        Text(pocketGreet("android"), style = MaterialTheme.typography.bodyLarge)
-        Text("core ${pocketCoreVersion()}", style = MaterialTheme.typography.bodySmall)
+        Text(palmcodeGreet("android"), style = MaterialTheme.typography.bodyLarge)
+        Text("core ${palmcodeCoreVersion()}", style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(24.dp))
         Button(onClick = { probeResult = runExecProbe(appContext) }) {
             Text("Run exec probe")

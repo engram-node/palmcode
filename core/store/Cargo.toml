@@ -1,5 +1,5 @@
 [package]
-name = "pocket-store"
+name = "palmcode-store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -9,11 +9,11 @@ plugins {
 val ndkVersionPin = "30.0.16248370"
 
 android {
-    namespace = "dev.pocket.app"
+    namespace = "dev.palmcode.app"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.pocket"
+        applicationId = "dev.palmcode"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -112,7 +112,7 @@ fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvide
     abiTriples.keys.map { abi ->
         tasks.register<Exec>("cargoNdk${variant.replaceFirstChar(Char::uppercase)}$abi") {
             group = "build"
-            description = "Build pocket-ffi with cargo-ndk ($variant, $abi)"
+            description = "Build palmcode-ffi with cargo-ndk ($variant, $abi)"
             workingDir = coreDir
             environment(cargoEnvironment(ndkDir))
             outputs.dir(layout.buildDirectory.dir("rust/$variant/jniLibs/$abi"))
@@ -123,7 +123,7 @@ fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvide
                 "--target", abi,
                 "--platform", "29",
                 "--output-dir", layout.buildDirectory.dir("rust/$variant/jniLibs").get().asFile.absolutePath,
-                "build", "-p", "pocket-ffi", *extraArgs.toTypedArray(),
+                "build", "-p", "palmcode-ffi", *extraArgs.toTypedArray(),
             )
         }
     }
@@ -144,9 +144,9 @@ val uniffiBindgen = tasks.register<Exec>("uniffiBindgen") {
     outputs.dir(layout.buildDirectory.dir("generated/uniffi"))
     commandLine(
         cargoCmd, "run", "--quiet",
-        "-p", "pocket-ffi", "--features", "cli", "--bin", "uniffi-bindgen", "--",
+        "-p", "palmcode-ffi", "--features", "cli", "--bin", "uniffi-bindgen", "--",
         "generate",
-        "--library", layout.buildDirectory.file("rust/debug/jniLibs/arm64-v8a/libpocketffi.so").get().asFile.absolutePath,
+        "--library", layout.buildDirectory.file("rust/debug/jniLibs/arm64-v8a/libpalmcode_ffi.so").get().asFile.absolutePath,
         "--language", "kotlin",
         "--out-dir", layout.buildDirectory.dir("generated/uniffi").get().asFile.absolutePath,
         "--no-format",

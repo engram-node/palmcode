@@ -1,27 +1,37 @@
-# Draft fdroiddata metadata for dev.pocket.
+# Draft fdroiddata metadata for dev.palmcode.
 # NOT validated with fdroidserver yet — finalized in M5 once the userland
 # build exists (srclib-free: everything is built in-tree from pinned sources).
+#
+# Vendoring note: core/vendor/ is committed (~65 MB working tree). This ships
+# the full Rust dependency closure IN the repo (byte-exact via .gitattributes
+# -text). Alternatives considered: (a) F-Droid prebuild downloading crates —
+# needs network trust + crates.io availability in the build VM; (b) cargo
+# vendor as a CI-released tarball — same, plus an artifact to host. Committed
+# vendor wins on determinism + offline builds; cost is repo size and the
+# "no binaries in repo" discipline applying only to OUR binaries (vendored
+# source fixtures remain, e.g. askama_parser tests/*.bin — upstream data,
+# documented).
 
 Categories:
   - Development
 License: GPL-3.0-only
-AuthorName: pocket contributors
-WebSite: https://github.com/OWNER/pocket
-SourceCode: https://github.com/OWNER/pocket
-IssueTracker: https://github.com/OWNER/pocket/issues
-Changelog: https://github.com/OWNER/pocket/releases
+AuthorName: palmcode contributors
+WebSite: https://github.com/engram-node/palmcode
+SourceCode: https://github.com/engram-node/palmcode
+IssueTracker: https://github.com/engram-node/palmcode/issues
+Changelog: https://github.com/engram-node/palmcode/releases
 
-AutoName: pocket
+AutoName: palmcode
 Summary: On-device coding agent; your keys, your models, your data stays local
 Description: |
-    pocket is a coding-agent harness that runs entirely on your phone. Point it
+    palmcode is a coding-agent harness that runs entirely on your phone. Point it
     at any OpenAI-compatible endpoint (OpenAI, OpenRouter, DeepSeek, a local
     llama.cpp/vLLM/Ollama server, ...) with your own API key. Sessions, repos,
     files, shell execution, and keys never leave the device. No accounts, no
     telemetry, no crash reporting.
 
 RepoType: git
-Repo: https://github.com/OWNER/pocket
+Repo: https://github.com/engram-node/palmcode
 
 Builds:
   - versionName: 0.1.0

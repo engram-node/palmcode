@@ -25,7 +25,7 @@ CI builds host-side code on `x86_64-unknown-linux-gnu` (glibc) anyway.
 - If a future desktop host CLI on Windows needs MSVC-only crates (e.g. some
   `windows-sys`-binding crates are fine, but anything requiring `link.exe`
   extensions), revisit.
-- UniFFI bindgen runs against the compiled Android `libpocketffi.so`
+- UniFFI bindgen runs against the compiled Android `libpalmcode_ffi.so`
   (ELF/goblin), sidestepping host-format concerns entirely.
 - **raw-dylib caveat (found on this machine):** crates using
   `#[link(kind="raw-dylib")]` (getrandom 0.3 via windows-link) require a
