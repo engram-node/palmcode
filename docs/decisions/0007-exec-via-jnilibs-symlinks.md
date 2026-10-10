@@ -1,6 +1,7 @@
 # 0007: Binaries shipped as `lib*.so`, executed via symlinks (spike B result)
 
-Date: 2026-10-10. Status: verified (emulator).
+Date: 2026-10-10. Status: verified (emulator + physical Motorola Edge 50 Neo,
+Android 16: exit 42, stdout correct, ~11 ms spawn).
 
 ## Context
 

@@ -8,7 +8,7 @@ per-turn overhead number; M6 publishes the full table.
 | Harness overhead per turn (excl. tool exec) | < 50 ms | — | — | — |
 | `read` tool | < 10 ms | — | — | — |
 | `grep`, ~10k-file repo, warm | < 300 ms | — | — | — |
-| `bash` spawn | < 30 ms | **~8 ms** (exec-probe, single sample, cold app) | Emulator pocket34 x86_64 API 34 | 2026-10-10 |
+| `bash` spawn | < 30 ms | **~8 ms** (exec-probe, single sample, cold app); **~11 ms** on Motorola Edge 50 Neo arm64 API 36 | Emulator pocket34 x86_64 API 34; Edge 50 Neo | 2026-10-10 |
 | Streaming jank @100 tok/s | < 2% janky frames | — | — | — |
 | Core RSS idle, 1k-file workspace | < 150 MB | — | — | — |
 | APK size arm64 | < 30 MB | 30.4 MB **debug, both ABIs** (not in scope of budget) | host | 2026-10-10 |

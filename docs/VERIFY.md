@@ -3,6 +3,22 @@
 What has actually been run, and where. Claims anywhere else in this repo are
 unverified unless listed here.
 
+## Verified on physical hardware
+
+**Motorola Edge 50 Neo (arm64-v8a, Android 16 / API 36)** — 2026-10-10:
+
+- Debug APK installs and launches; UI renders the Rust greeting (UniFFI →
+  `libpocketffi.so`, arm64). ✓
+- **Spike B on real hardware: PASS.** Symlink
+  `files/bin/probe` → `.../lib/arm64/libexecprobe.so` exec'd through the
+  symlink: stdout captured, exit code 42, ~11 ms spawn. targetSdk 36 on
+  Android 16. (`scripts/verify-m0.ps1 -Serial ZD222NNHWP`)
+- **Spike A binary on real hardware: PASS.** `git` 2.56.0 aarch64 binary
+  (built per ADR 0006, stripped to 3.5 MB) ran the full local cycle:
+  init / add / commit ×2 / diff --stat / log --oneline / status --short.
+  Only the two known cosmetic warnings (template path, GIT_EXEC_PATH) —
+  documented for M3 in ADR 0006.
+
 ## Verified on device
 
 **Android Emulator `pocket34` (x86_64, Android 14 / API 34, google_apis, WHPX)**
@@ -40,8 +56,6 @@ unverified unless listed here.
 
 ## Assumed, not yet verified
 
-- Exec-via-symlink on a **physical** device (spec asks for real hardware; the
-  emulator result above is the stand-in until then).
 - `assembleRelease` from a pristine clone (clean-clone build: planned next).
 - GitHub Actions CI: rust job (fmt/clippy/test/deny) + android job
   (NDK r30 cross-build both ABIs, `assembleDebug`/`assembleRelease`,

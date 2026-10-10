@@ -1,7 +1,7 @@
 # 0006: Git 2.56.0 cross-builds with NDK r30 via upstream configure (spike A result)
 
-Date: 2026-10-10. Status: verified (build + emulator run). Scripts:
-`userland/spike/git-configure.sh`, `userland/spike/git-make.sh`.
+Date: 2026-10-10. Status: verified (build + emulator run + physical device).
+Scripts: `userland/spike/git-configure.sh`, `userland/spike/git-make.sh`.
 
 ## Verdict
 
@@ -9,9 +9,9 @@ Date: 2026-10-10. Status: verified (build + emulator run). Scripts:
 
 aarch64 AND x86_64 `git` 2.56.0 binaries linked clean (ELF PIE, interpreter
 `/system/bin/linker64`, NDK r30, API 29). The x86_64 binary ran on the
-emulator: `git --version` → "git version 2.56.0", and
-init/add/commit/log/status/diff all worked. Size: ~19 MB unstripped,
-~3.9 MB after `llvm-strip`.
+emulator and the **aarch64 binary ran on a Motorola Edge 50 Neo (Android 16)**:
+`git --version` → "git version 2.56.0", init/add/commit×2/diff/log/status all
+correct. Size: ~19 MB unstripped, ~3.5–3.9 MB after `llvm-strip`.
 
 ## Recipe (full record for M3's build.sh)
 
