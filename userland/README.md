@@ -1,6 +1,6 @@
 # userland
 
-Reproducible, checksum-verified source builds of the binaries pocket ships as
+Reproducible, checksum-verified source builds of the binaries palmcode ships as
 `lib<name>.so` in `jniLibs`:
 
 - **busybox** (ash + applet set)

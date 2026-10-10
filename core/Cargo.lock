@@ -308,6 +308,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "palmcode-agent"
+version = "0.1.0"
+
+[[package]]
+name = "palmcode-bench"
+version = "0.1.0"
+
+[[package]]
+name = "palmcode-cli"
+version = "0.1.0"
+dependencies = [
+ "palmcode-ffi",
+]
+
+[[package]]
+name = "palmcode-exec"
+version = "0.1.0"
+
+[[package]]
+name = "palmcode-ffi"
+version = "0.1.0"
+dependencies = [
+ "uniffi",
+]
+
+[[package]]
+name = "palmcode-llm"
+version = "0.1.0"
+
+[[package]]
+name = "palmcode-store"
+version = "0.1.0"
+
+[[package]]
+name = "palmcode-tools"
+version = "0.1.0"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -318,44 +356,6 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
-
-[[package]]
-name = "pocket-agent"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-bench"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-cli"
-version = "0.1.0"
-dependencies = [
- "pocket-ffi",
-]
-
-[[package]]
-name = "pocket-exec"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-ffi"
-version = "0.1.0"
-dependencies = [
- "uniffi",
-]
-
-[[package]]
-name = "pocket-llm"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-store"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-tools"
-version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

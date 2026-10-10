@@ -1,5 +1,5 @@
 [package]
-name = "pocket-llm"
+name = "palmcode-llm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

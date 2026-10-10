@@ -1,5 +1,5 @@
 [package]
-name = "pocket-exec"
+name = "palmcode-exec"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

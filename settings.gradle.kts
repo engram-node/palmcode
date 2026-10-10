@@ -13,6 +13,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "pocket"
+rootProject.name = "palmcode"
 
 include(":android:app")

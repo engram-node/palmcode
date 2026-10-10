@@ -3,51 +3,79 @@
 What has actually been run, and where. Claims anywhere else in this repo are
 unverified unless listed here.
 
-## Verified on device
+**Claim discipline:** an ABI/devices claim only counts as verified when it
+ran on *physical* hardware, listed below with date. Emulator results are
+called out as emulator-only.
 
-**Android Emulator `pocket34` (x86_64, Android 14 / API 34, google_apis, WHPX)**
+## One-command device probe (canonical gate)
 
-2026-10-10:
+Requires: phone with USB debugging on, this machine's SDK + NDK, and a built
+debug APK (`./gradlew assembleDebug`).
 
-- APK installs and launches; UI renders the Rust greeting
-  "pocket core 0.1.0 online, hello android" (UniFFI → JNA → `libpocketffi.so`). ✓
-- **Spike B (exec via symlink): PASS.** App created
-  `/data/user/0/dev.pocket/files/bin/probe` → `.../lib/x86_64/libexecprobe.so`
-  and `Runtime.exec()`'d it through the symlink: stdout captured
-  ("exec-probe ok pid=7384"), exit code 42, ~8 ms spawn.
-  `useLegacyPackaging=true`, targetSdk 36. (repeat on physical hardware TBD)
-- `platforms;android-36` + `build-tools;36.0.0` + NDK 30.0.16248370 +
-  `pocket34` AVD: `./gradlew assembleDebug` green end to end;
-  `assembleRelease` green, unsigned APK 23.5 MB. ✓
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/phone-probe.ps1 -Serial <adb-serial>
+```
 
-## Verified on host (Windows 11, this machine) and CI-relevant
+It prints a markdown table (paste it back, or file it below), covering:
+FFI greeting rendered • exec-through-symlink (exit code, stdout, spawn ms) •
+16 KB `p_align` check of the natives installed on the phone • on-device git
+cycle (needs the stripped aarch64 git from `userland/spike/`, else SKIP).
 
-- `cargo build/test/clippy --workspace` + `cargo fmt --check`: green.
-- `cargo deny check` (advisories, bans, licenses, sources): green
-  (binary: prebuilt 0.20.2 MSVC build, sha256-verified; see ADR 0001 —
-  0.20.2 does not compile for `x86_64-pc-windows-gnu`).
-- Vendored offline build: `cargo build --offline --workspace` green with an
-  empty cargo registry cache.
-- arm64 `libpocketffi.so` (NDK r30 default link flags): all LOAD segments
-  `p_align = 0x4000` (16 KB page-size alignment requirement). ✓
-- **Spike A (git cross-build): FEASIBLE, verified end to end (ADR 0006).**
-  `git` 2.56.0 built from sha256-verified source for aarch64 AND x86_64
-  (upstream configure + two ac_cv overrides + three `config.mak` knobs);
-  the x86_64 binary ran on the emulator: `git version 2.56.0`,
-  init/add/commit (40d8c84)/log/status/diff all OK. arm64 binary LOAD
-  segments all `p_align=0x4000` (16 KB). ~3.9 MB stripped per ABI.
-  Open: HTTPS remotes (curl+TLS) — deferred to M3, see ADR 0006.
+Paste-area template — one row per device, newest first:
+
+| Field | Result |
+|---|---|
+| Device | <model>, Android <ver> (API <level>), <abi> |
+| Date | <yyyy-mm-dd> |
+| FFI greeting | `<greeting>` |
+| Exec-via-symlink | `<exit=42 … ms>` |
+| Symlink target | `<files/bin/probe -> …/lib<abi>/libexecprobe.so>` |
+| 16 KB alignment | <lib*.so: ok; …> |
+| git on-device | <version; cycle result; stripped size> |
+
+## Verified on physical hardware
+
+Verified via the probe above (identical app, post-rename `dev.palmcode`).
+
+| Field | Result |
+|---|---|
+| Device | motorola edge 50 neo, Android 16 (API 36), arm64-v8a |
+| Date | 2026-10-10 |
+| FFI greeting | `palmcode core 0.1.0 online, hello android` |
+| Exec-via-symlink | `exit=42 out="exec-probe ok pid=16563" (10 ms)` |
+| Symlink target | `/data/user/0/dev.palmcode/files/bin/probe -> …/lib/arm64/libexecprobe.so` |
+| 16 KB alignment | libandroidx.graphics.path.so: ok; libexecprobe.so: ok; libjnidispatch.so: ok; libpalmcode_ffi.so: ok |
+| git on-device | git version 2.56.0; init/add/commit x2/log/status OK; 3.55 MB |
+
+Earlier M0-era run (pre-rename `dev.pocket`, same mechanics): exec ~11 ms,
+git cycle OK on the same phone (commit `e26be30`, PR #3).
+
+## Verified on device (emulator only — x86_64)
+
+**Emulator `palmcode34` (x86_64, Android 14 / API 34, google_apis, WHPX)**,
+2026-10-10: APK installs; greeting renders; exec-through-symlink exit 42,
+~8 ms spawn. Emulator-only: does not substitute for the physical section.
+
+## Verified on host + CI
+
+- `cargo build/test/clippy --workspace` + `fmt --check` + `cargo deny`:
+  green (Windows host; ubuntu-24.04 CI).
+- Vendored offline build (`core/vendor`, byte-exact via
+  `.gitattributes core/vendor/** -text`): green on Windows AND linux CI.
+- arm64 `libpalmcode_ffi.so` LOAD segments `p_align = 0x4000` — host-side
+  artifact check ✓ (device row above is authoritative for runtime).
+- GitHub Actions: rust + android jobs green on PR #1; repro job added in the
+  M1-prep PR (this branch), first run reported there.
+- Gradle wrapper pinned (`distributionSha256Sum` =
+  acd53f1e…04d20a per gradle.org/release-checksums); dependency verification
+  metadata: 341 components sha256-pinned (cross-OS aapt2 variants manually
+  pinned + sha1-cross-checked).
+- Release APK reproducibility: CI `repro` job, first run (ubuntu-24.04,
+  2026-10-10): **DETERMINISTIC — byte-identical** across clean rebuilds.
 
 ## Assumed, not yet verified
 
-- Exec-via-symlink on a **physical** device (spec asks for real hardware; the
-  emulator result above is the stand-in until then).
-- `assembleRelease` from a pristine clone (clean-clone build: planned next).
-- GitHub Actions CI: rust job (fmt/clippy/test/deny) + android job
-  (NDK r30 cross-build both ABIs, `assembleDebug`/`assembleRelease`,
-  APK artifact) — green on PR #1 (ubuntu-24.04). ✓
 - F-Droid build-server acceptance of the layout (`docs/fdroid/` draft; M5).
 - Phantom-process limits on Android 12+ (docs/TROUBLESHOOTING.md), M3.
-- External-storage (`/storage/emulated/0`) performance delta; measurement M5.
-- cold `cargo ndk` x86_64 abi (used by the emulator APK — implicitly proven by
-  the pass above).
+- External-storage performance delta; measurement M5.
+- busybox / ripgrep cross-builds (M3; sizes in ADR 0008 are estimates).

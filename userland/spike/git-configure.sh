@@ -2,7 +2,7 @@
 # Spike A, attempt 1: upstream ./configure cross-compile for Android.
 # Run under MSYS2:  bash /c/repos/palmcode/userland/spike/git-configure.sh
 set -euo pipefail
-cd ~/pocket-spike/git-2.56.0
+cd ~/palmcode-spike/git-2.56.0
 N=/c/Users/OM/AppData/Local/Android/Sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/windows-x86_64
 export PATH="$N/bin:$PATH"
 ./configure --host=aarch64-linux-android \

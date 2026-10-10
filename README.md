@@ -1,4 +1,4 @@
-# pocket
+# palmcode
 
 On-device, BYOK coding-agent harness for Android. The agent runs entirely on the
 phone; the only network traffic is the user's own LLM requests to an
