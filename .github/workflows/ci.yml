@@ -12,8 +12,11 @@ jobs:
         working-directory: core
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain (pinned by rust-toolchain.toml)
+      - name: Rust toolchain (pinned, mirrors rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy, rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -35,8 +38,11 @@ jobs:
         uses: android-actions/setup-android@v3
       - name: Install SDK components (pinned versions)
         run: yes | sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
-      - name: Rust toolchain (pinned by rust-toolchain.toml)
+      - name: Rust toolchain (pinned, mirrors rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          targets: aarch64-linux-android, x86_64-linux-android
       - name: Install cargo-ndk
         run: cargo install --locked cargo-ndk@4.1.2
       - name: Assemble
