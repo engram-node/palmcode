@@ -1,4 +1,4 @@
-# cargo-deny configuration. Project license: GPL-3.0-only.
+# cargo-deny configuration. Project license: Apache-2.0.
 # Dependencies must be FOSS; anything outside `allow` fails CI.
 
 [graph]
@@ -21,7 +21,6 @@ highlight = "all"
 
 [licenses]
 version = 2
-private = { ignore = true }
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

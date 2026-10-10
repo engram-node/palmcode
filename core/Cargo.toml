@@ -6,7 +6,7 @@ members = ["agent", "bench", "exec", "ffi", "host-cli", "llm", "store", "tools"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 publish = false
 
 [profile.release]

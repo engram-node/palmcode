@@ -52,13 +52,13 @@ jobs:
           path: android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-  # Reproducibility: build the unsigned release APK twice from scratch and
-  # compare. APKs are unsigned (F-Droid signs later), so there is no
-  # signature block to strip — equality must be byte-exact.
+  # Reproducibility: build the unsigned release APK twice in DIFFERENT
+  # dirs with different HOME/GRADLE_USER_HOME, --remap-path-prefix active
+  # for the Rust side. APKs are unsigned (F-Droid signs later), so there is
+  # no signature block to strip — equality must be byte-exact.
   repro:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -72,30 +72,45 @@ jobs:
           targets: aarch64-linux-android, x86_64-linux-android
       - name: Install cargo-ndk
         run: cargo install --locked cargo-ndk@4.1.2
-      - name: Build 1
+      - uses: actions/checkout@v4
+        with:
+          path: build-one
+      - uses: actions/checkout@v4
+        with:
+          path: build-two
+      - name: Build 1 (dir build-one, HOME=/tmp/home1)
         run: |
+          export HOME=/tmp/home1 GRADLE_USER_HOME=/tmp/home1/.gradle
+          mkdir -p "$HOME"
+          cd build-one
+          export RUSTFLAGS="--remap-path-prefix=$PWD=build"
           ./gradlew --no-daemon assembleRelease
-          cp android/app/build/outputs/apk/release/app-release-unsigned.apk /tmp/apk1.apk
-      - name: Build 2 (clean)
+          sha256sum android/app/build/outputs/apk/release/*.apk | tee /tmp/hashes1.txt
+      - name: Build 2 (dir build-two, HOME=/tmp/home2)
         run: |
-          ./gradlew --no-daemon clean assembleRelease
-          cp android/app/build/outputs/apk/release/app-release-unsigned.apk /tmp/apk2.apk
+          export HOME=/tmp/home2 GRADLE_USER_HOME=/tmp/home2/.gradle
+          mkdir -p "$HOME"
+          cd build-two
+          export RUSTFLAGS="--remap-path-prefix=$PWD=build"
+          ./gradlew --no-daemon assembleRelease
+          sha256sum android/app/build/outputs/apk/release/*.apk | tee /tmp/hashes2.txt
       - name: Compare
         run: |
-          sha256sum /tmp/apk1.apk /tmp/apk2.apk
-          if cmp -s /tmp/apk1.apk /tmp/apk2.apk; then
-            echo "DETERMINISTIC: release APK builds byte-identical" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### WARNING: release APK is NOT byte-reproducible"
-              echo '```'
-              mkdir -p /tmp/a1 /tmp/a2
-              (cd /tmp/a1 && unzip -qa /tmp/apk1.apk)
-              (cd /tmp/a2 && unzip -qa /tmp/apk2.apk)
-              (cd /tmp/a1 && find . -type f | sort | xargs sha256sum) > /tmp/h1
-              (cd /tmp/a2 && find . -type f | sort | xargs sha256sum) > /tmp/h2
-              diff /tmp/h1 /tmp/h2 || true
-              echo '```'
-            } | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          fail=0
+          for apk in build-one/android/app/build/outputs/apk/release/*.apk; do
+            name=$(basename "$apk")
+            other="build-two/android/app/build/outputs/apk/release/$name"
+            if cmp -s "$apk" "$other"; then
+              echo "DETERMINISTIC: $name" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "### WARNING: $name NOT byte-reproducible" | tee -a "$GITHUB_STEP_SUMMARY"
+              mkdir -p "/tmp/cmp/$name.a" "/tmp/cmp/$name.b"
+              (cd "/tmp/cmp/$name.a" && unzip -qa "$OLDPWD/$apk")
+              (cd "/tmp/cmp/$name.b" && unzip -qa "$OLDPWD/$other")
+              (cd "/tmp/cmp/$name.a" && find . -type f | sort | xargs sha256sum) > /tmp/cmp/h1
+              (cd "/tmp/cmp/$name.b" && find . -type f | sort | xargs sha256sum) > /tmp/cmp/h2
+              { echo '```'; diff /tmp/cmp/h1 /tmp/cmp/h2 || true; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+              fail=1
+            fi
+          done
+          exit $fail

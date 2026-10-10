@@ -22,6 +22,15 @@ android {
 
     ndkVersion = ndkVersionPin
 
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true   // arm64/x86_64 per-ABI + universal for F-Droid/dev
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -52,6 +61,9 @@ android {
         named("main") {
             jniLibs.directories += "build/userland/jniLibs"
             kotlin.directories += "build/generated/uniffi"
+            // NOTE: AGP9 rejects Provider<> here (android.sourceset.disallowProvider);
+            // a plain relative string is the accepted form.
+            assets.srcDir("build/generated/assets")
         }
         named("debug") {
             jniLibs.directories += "build/rust/debug/jniLibs"
@@ -179,11 +191,19 @@ val execProbeTasks = abiTriples.map { (abi, triple) ->
     }
 }
 
+// License texts (Apache-2.0 obligation stack, GPL source offer) ship as
+// assets; the app shows them from the home screen.
+val copyLicenseAssets = tasks.register<Copy>("copyLicenseAssets") {
+    from(rootProject.projectDir) { include("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES") }
+    into(layout.buildDirectory.dir("generated/assets"))
+}
+
 tasks.named("preBuild") {
     dependsOn(cargoNdkDebug)
     dependsOn(cargoNdkRelease)
     dependsOn(uniffiBindgen)
     dependsOn(execProbeTasks)
+    dependsOn(copyLicenseAssets)
 }
 
 dependencies {

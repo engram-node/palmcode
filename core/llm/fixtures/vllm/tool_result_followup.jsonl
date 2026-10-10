@@ -1,0 +1,18 @@
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" file contains"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" a simple Rust"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" program. Let me report"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" what I found"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".","content":"The"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" file `src/main.rs` contains"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" a minimal Rust program:\n\n```rust\n"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"fn main() {"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" println!(\"hi\"); }\n``"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"`\n\nIt defines the `main` function"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":", which is"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" the entry point of"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" a Rust program, and prints `"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"hi` to the console when"}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" run."}}]}
+{"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

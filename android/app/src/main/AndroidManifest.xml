@@ -1,11 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
       INTERNET: LLM requests to the user's own endpoint (only network traffic).
       POST_NOTIFICATIONS: approvals + run status (foreground service, M3).
-      usesCleartextTraffic="true": LAN/Tailscale endpoints (llama.cpp, vLLM,
-      Ollama) are often plain http; the app warns once on first http use (M1).
+      usesCleartextTraffic="true": LAN/Tailscale vLLM endpoints are often plain http; the app warns once on first http use (M1).
       allowBackup="false": API keys and workspaces must never leave the device.
     -->
     <uses-permission android:name="android.permission.INTERNET" />

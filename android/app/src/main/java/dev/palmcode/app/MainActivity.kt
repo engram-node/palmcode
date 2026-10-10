@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,5 +61,27 @@ fun HomeScreen() {
         }
         Spacer(Modifier.height(8.dp))
         Text(probeResult, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(24.dp))
+        LicenseSection()
+    }
+}
+
+// Apache-2.0 / GPL-2.0 notice obligations: assets are bundled by
+// copyLicenseAssets (see build.gradle.kts); texts live at the repo root.
+@Composable
+fun LicenseSection() {
+    val context = LocalContext.current
+    var show by remember { mutableStateOf(false) }
+    val text by remember {
+        mutableStateOf(
+            context.assets.open("THIRD_PARTY_LICENSES").bufferedReader().use { it.readText() },
+        )
+    }
+    OutlinedButton(onClick = { show = !show }) {
+        Text(if (show) "Hide third-party licenses" else "Third-party licenses")
+    }
+    if (show) {
+        Spacer(Modifier.height(8.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall)
     }
 }

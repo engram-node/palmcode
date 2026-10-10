@@ -1,20 +1,20 @@
-# Draft fdroiddata metadata for dev.palmcode.
-# NOT validated with fdroidserver yet — finalized in M5 once the userland
+﻿# Draft fdroiddata metadata for dev.palmcode.
+# NOT validated with fdroidserver yet â€” finalized in M5 once the userland
 # build exists (srclib-free: everything is built in-tree from pinned sources).
 #
 # Vendoring note: core/vendor/ is committed (~65 MB working tree). This ships
 # the full Rust dependency closure IN the repo (byte-exact via .gitattributes
-# -text). Alternatives considered: (a) F-Droid prebuild downloading crates —
+# -text). Alternatives considered: (a) F-Droid prebuild downloading crates â€”
 # needs network trust + crates.io availability in the build VM; (b) cargo
-# vendor as a CI-released tarball — same, plus an artifact to host. Committed
+# vendor as a CI-released tarball â€” same, plus an artifact to host. Committed
 # vendor wins on determinism + offline builds; cost is repo size and the
 # "no binaries in repo" discipline applying only to OUR binaries (vendored
-# source fixtures remain, e.g. askama_parser tests/*.bin — upstream data,
+# source fixtures remain, e.g. askama_parser tests/*.bin â€” upstream data,
 # documented).
 
 Categories:
   - Development
-License: GPL-3.0-only
+License: Apache-2.0
 AuthorName: palmcode contributors
 WebSite: https://github.com/engram-node/palmcode
 SourceCode: https://github.com/engram-node/palmcode
@@ -25,8 +25,8 @@ AutoName: palmcode
 Summary: On-device coding agent; your keys, your models, your data stays local
 Description: |
     palmcode is a coding-agent harness that runs entirely on your phone. Point it
-    at any OpenAI-compatible endpoint (OpenAI, OpenRouter, DeepSeek, a local
-    llama.cpp/vLLM/Ollama server, ...) with your own API key. Sessions, repos,
+    at any vLLM-serving endpoint (hosted gateway or self-hosted server,
+    see docs/VLLM.md) with your own API key. Sessions, repos,
     files, shell execution, and keys never leave the device. No accounts, no
     telemetry, no crash reporting.
 
