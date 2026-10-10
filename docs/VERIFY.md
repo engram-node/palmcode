@@ -67,12 +67,14 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
 - GitHub Actions: rust + android jobs green on PR #1; repro job added in the
   M1-prep PR (this branch), first run reported there.
 - Gradle wrapper pinned (`distributionSha256Sum` =
-  acd53f1e…04d20a per gradle.org/release-checksums).
+  acd53f1e…04d20a per gradle.org/release-checksums); dependency verification
+  metadata: 341 components sha256-pinned (cross-OS aapt2 variants manually
+  pinned + sha1-cross-checked).
+- Release APK reproducibility: CI `repro` job, first run (ubuntu-24.04,
+  2026-10-10): **DETERMINISTIC — byte-identical** across clean rebuilds.
 
 ## Assumed, not yet verified
 
-- Bit-for-bit reproducible release APK (new `repro` CI job: first verdict
-  pending on this branch).
 - F-Droid build-server acceptance of the layout (`docs/fdroid/` draft; M5).
 - Phantom-process limits on Android 12+ (docs/TROUBLESHOOTING.md), M3.
 - External-storage performance delta; measurement M5.
