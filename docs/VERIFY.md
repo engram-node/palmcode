@@ -70,8 +70,12 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
   acd53f1e…04d20a per gradle.org/release-checksums); dependency verification
   metadata: 341 components sha256-pinned (cross-OS aapt2 variants manually
   pinned + sha1-cross-checked).
-- Release APK reproducibility: CI `repro` job, first run (ubuntu-24.04,
-  2026-10-10): **DETERMINISTIC — byte-identical** across clean rebuilds.
+- Release APK reproducibility: CI `repro` job (ubuntu-24.04). 2026-10-10:
+  DETERMINISTIC same-dir. 2026-10-11 hardened (PR #5, run 38094399051):
+  two checkouts in different dirs, different HOME + GRADLE_USER_HOME,
+  RUSTFLAGS --remap-path-prefix active - **DETERMINISTIC, all three APKs
+  byte-identical** (arm64-v8a de2fcbba..., universal f21cb8c7...,
+  x86_64 d82ba334...).
 
 ## Assumed, not yet verified
 
