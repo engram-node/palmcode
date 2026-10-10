@@ -43,6 +43,9 @@ unverified unless listed here.
 - Exec-via-symlink on a **physical** device (spec asks for real hardware; the
   emulator result above is the stand-in until then).
 - `assembleRelease` from a pristine clone (clean-clone build: planned next).
+- GitHub Actions CI: rust job (fmt/clippy/test/deny) + android job
+  (NDK r30 cross-build both ABIs, `assembleDebug`/`assembleRelease`,
+  APK artifact) — green on PR #1 (ubuntu-24.04). ✓
 - F-Droid build-server acceptance of the layout (`docs/fdroid/` draft; M5).
 - Phantom-process limits on Android 12+ (docs/TROUBLESHOOTING.md), M3.
 - External-storage (`/storage/emulated/0`) performance delta; measurement M5.
