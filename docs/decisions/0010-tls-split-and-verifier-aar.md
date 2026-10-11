@@ -29,9 +29,10 @@ collide:
 - `core/vendor/…/maven/**.aar` is a prebuilt binary inside vendored source.
   AGENTS.md's "no binaries" rule targets *userland executables*; vendored
   crates are committed as-is and this AAR is the crate's official runtime
-  artifact (MIT OR Apache-2.0). Accepted; if the F-Droid scanner flags it,
-  the fallback is rebuilding the AAR from the crate's sibling source repo
-  during the F-Droid build recipe.
+  artifact (MIT OR Apache-2.0). Accepted.
+  **Resolved 2026-10-12:** fdroidserver 2.4.5 scanner run over source tree +
+  release APK (docs/FDROID_SCAN.md): 0 errors; the AAR produced no finding.
+  The rebuild-from-source fallback below remains only as a contingency.
 - Host and Android exercise different TLS stacks; the client keeps a single
   `Cleartext` policy so behavior differences stay limited to cert verification.
 
