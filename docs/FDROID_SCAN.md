@@ -13,6 +13,13 @@ python -m venv <venv>; <venv>/Scripts/pip install fdroidserver
 # (the CLI wants fdroiddata metadata; the API path is what build entries use)
 ```
 
+**WARNING: `scan_source` is destructive.** Every "Removing …" info is a
+real deletion in the scanned directory: it deleted `gradlew`, `gradlew.bat`,
+`gradle/wrapper/gradle-wrapper.jar` and all built APKs from this checkout.
+Always scan a `git clean -x`-tolerant copy, or `git checkout -- <path>`
+afterwards. Run it on the tree, then restore: tracked files recover via git,
+build outputs via a rebuild — which is what we did here.
+
 ## APK scan — CLEAN
 
 - `classes2.dex` scanned with dexdump for known non-free classes: none found.
