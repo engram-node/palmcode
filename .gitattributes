@@ -1,9 +1,10 @@
 * text=auto eol=lf
-# Vendored crates: never normalize; cargo's .cargo-checksum.json is computed
-# over the published bytes (some crates carry CRLF files upstream).
-core/vendor/** -text
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.jar binary
 *.png binary
 *.so binary
+# Vendored crates: never normalize; cargo's .cargo-checksum.json is computed
+# over the published bytes (some crates carry CRLF files upstream).
+# Must come LAST so it overrides the glob rules above inside core/vendor.
+core/vendor/** -text
