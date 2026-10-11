@@ -4,20 +4,22 @@
 #
 #   powershell -ExecutionPolicy Bypass -File scripts/phone-probe.ps1 -Serial <adb-serial>
 #
-# Optional: -GitBinary <path to stripped aarch64 git> — autodetects the M0
+# Optional: -GitBinary <path to stripped aarch64 git> - autodetects the M0
 # spike build under MSYS2 home. Pass -GitBinary "" to skip the git section.
 param(
     [string]$Serial = "",
     [string]$GitBinary = "C:\msys64\home\OM\palmcode-spike\git-2.56.0\git"
 )
-# NB: no $ErrorActionPreference="Stop" — PowerShell 5.1 turns *any* native
+# NB: no $ErrorActionPreference="Stop" - PowerShell 5.1 turns *any* native
 # stderr output (adb progress messages) into an ending NativeCommandError.
 # Guards instead: explicit exit-code checks + content assertions below.
 $sdk  = "C:\Users\OM\AppData\Local\Android\Sdk"
 $adb  = "$sdk\platform-tools\adb.exe"
 $re   = "$sdk\ndk\30.0.16248370\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe"
 $strip = "$sdk\ndk\30.0.16248370\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe"
-$apk  = "C:\repos\palmcode\android\app\build\outputs\apk\debug\app-debug.apk"
+# ABI splits are enabled; prefer the per-ABI APK, fall back to universal.
+$apkDir = "C:\repos\palmcode\android\app\build\outputs\apk\debug"
+$abiMap = @{ "arm64-v8a" = "app-arm64-v8a-debug.apk"; "x86_64" = "app-x86_64-debug.apk" }
 
 if ($Serial) { $target = @("-s", $Serial) } else {
     $devs = (& $adb devices) -split "`n" | Where-Object { $_ -match "`tdevice$" }
@@ -39,7 +41,12 @@ $model = Sh "getprop ro.product.model"
 $av    = Sh "getprop ro.build.version.release"
 $sdkLv = Sh "getprop ro.build.version.sdk"
 $abi   = Sh "getprop ro.product.cpu.abi"
-if (-not (Test-Path $apk)) { throw "build first: ./gradlew assembleDebug ($apk missing)" }
+$apkName = $abiMap[$abi]
+$apk = $null
+if ($apkName) { $apk = Join-Path $apkDir $apkName }
+if (-not $apkName -or -not (Test-Path $apk)) { $apk = Join-Path $apkDir "app-universal-debug.apk" }
+if (-not (Test-Path $apk)) { $apk = Join-Path $apkDir "app-debug.apk" }
+if (-not (Test-Path $apk)) { throw "build first: ./gradlew assembleDebug (no APK in $apkDir)" }
 
 # ---- 1. FFI greeting
 & $adb @target install -r $apk 2>$null | Out-Null

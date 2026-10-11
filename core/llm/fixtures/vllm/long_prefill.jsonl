@@ -1,0 +1,18 @@
+{"id":"chatcmpl-aeba5da006160ab0","object":"chat.completion.chunk","created":1791663550,"model":"glm-latest","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" user is asking a"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" simple question despite"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" the very"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" long repetitive"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" context. The context"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" is just \""}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The quick brown fox jumps over the lazy"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" dog\" repeated many"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" times. The question"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" asks"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" which animal the"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" fox jumps over -"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" the"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","created":1791663550,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" answer is \"dog\".","content":"Dog"}}]}
+{"id":"chatcmpl-aeba5da006160ab0","object":"chat.completion.chunk","created":1791663550,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"."}}]}
+{"id":"chatcmpl-aeba5da006160ab0","object":"chat.completion.chunk","created":1791663550,"model":"glm-latest","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

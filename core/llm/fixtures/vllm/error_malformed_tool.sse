@@ -1,0 +1,1 @@
+{"error":{"message":"1 validation error:\n  {'type': 'missing', 'loc': ('body', 'tools', 0, 'function'), 'msg': 'Field required', 'input': {'type': 'function'}}\n  (trimmed/redacted from a real 400 captured via scripts/trace-sse.ps1; gateway-internal paths and model-group fallback chains removed)","type":"Bad Request","param":"body.tools.0.function","code":400}}

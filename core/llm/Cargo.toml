@@ -7,3 +7,42 @@ license.workspace = true
 publish = false
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time", "sync", "io-util", "net"] }
+tracing = "0.1"
+zeroize = "1"
+# NOTE: vendor/ size is dominated by windows-sys bindgen crates pulled via
+# tokio/reqwest/schannel. idna_adapter (1.2.2) has no small-data backend —
+# accepting the vendor weight rather than patching the url/idna chain.
+
+# TLS: platform trust store only (docs/VLLM.md). Host targets use the OS
+# stack (schannel on Windows, system OpenSSL on Linux) because ring 0.17
+# cannot link its fiat asm on x86_64-pc-windows-gnu (upstream issue);
+# Android uses rustls + ring + rustls-platform-verifier (runtime JNI init:
+# core/ffi).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "native-tls",
+    "stream",
+    "json",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots-no-provider",
+    "stream",
+    "json",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-platform-verifier = "0.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"

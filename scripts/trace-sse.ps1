@@ -1,13 +1,13 @@
-# SSE trace recorder (M1). Captures real streaming responses from an
-# OpenAI-compatible endpoint so core/llm's SSE parser and provider-quirk
-# handling can be built and regression-tested offline.
+# SSE trace recorder (M1). Captures real streaming responses from a vLLM(-like)
+# endpoint so core/llm's SSE parser and vLLM quirk handling can be built and
+# regression-tested offline. v1 fixture set is vLLM-only (docs/VLLM.md).
 #
 # Secrets policy:
 #   - API key comes from an ENV VAR only (never args, never files).
-#   - Output dir MUST be git-ignored (abort otherwise).
+#   - Output dir MUST be git-ignored unless -AllowCommit (scrubbed fixtures
+#     may then live under core/llm/fixtures/vllm/).
 #   - Every captured byte is scrubbed before writing to disk; if the key
 #     survives scrubbing anywhere, the file is deleted and the run aborts.
-#   - Nothing here is ever committed: traces/ is in .gitignore.
 #
 # Usage:
 #   $env:PALMCODE_LLM_API_KEY = "sk-..."
@@ -17,83 +17,101 @@ param(
     [string]$BaseUrl = "https://grid.ai.juspay.net/v1",
     [string]$Model = "glm-latest",
     [string]$FastModel = "glm-5.3-flash",
-    [int]$MaxTokens = 4096
+    [int]$MaxTokens = 4096,
+    [switch]$AllowCommit
 )
 
 $repo = Split-Path $PSScriptRoot -Parent
 $outAbs = Join-Path $repo $OutDir
 New-Item -ItemType Directory -Force $outAbs | Out-Null
 
-# --- must be git-ignored
+# --- output policy
 Push-Location $repo
-$ignored = git check-ignore $OutDir
+$ignored = git check-ignore $OutDir 2>$null
 Pop-Location
-if (-not $ignored) { throw "$OutDir/ is not git-ignored; refusing to write traces there." }
+if (-not $ignored -and -not $AllowCommit) {
+    throw "$OutDir/ is not git-ignored; refusing WITHOUT -AllowCommit (scrubbed fixtures only)."
+}
 
 # --- key from env only
 $apiKey = $env:PALMCODE_LLM_API_KEY
 if (-not $apiKey) { $apiKey = $env:GLM_API_KEY }
 if (-not $apiKey) { throw "set `$env:PALMCODE_LLM_API_KEY (or GLM_API_KEY) first" }
 
+$readFile = @{
+    type     = "function"
+    function = @{
+        name        = "read_file"
+        description = "Read a file from the workspace"
+        parameters  = @{ type = "object"; properties = @{ path = @{ type = "string" } }; required = @("path") }
+    }
+}
+$listFiles = @{
+    type     = "function"
+    function = @{
+        name        = "list_files"
+        description = "List files under a directory"
+        parameters  = @{ type = "object"; properties = @{ dir = @{ type = "string" } }; required = @("dir") }
+    }
+}
+# deterministic ~6 KB prefill payload (byte-stable across runs)
+$prefill = ("The quick brown fox jumps over the lazy dog. " * 340)
+
 $cases = @(
     @{
-        name   = "simple"
-        model  = $FastModel
-        body   = @{
-            model      = $FastModel
-            messages   = @(@{ role = "user"; content = "Reply with the word: pong" })
-            max_tokens = 64
-            stream     = $true
+        name = "simple"; model = $FastModel
+        body = @{
+            model = $FastModel; stream = $true; max_tokens = 64
+            messages = @(@{ role = "user"; content = "Reply with the word: pong" })
         }
     },
     @{
-        name   = "reasoning"
-        model  = $Model
-        body   = @{
-            model      = $Model
-            messages   = @(@{ role = "user"; content = "What is 17*23? Think briefly, then answer with just the number." })
-            max_tokens = $MaxTokens
-            stream     = $true
+        name = "reasoning"; model = $Model
+        body = @{
+            model = $Model; stream = $true; max_tokens = $MaxTokens
+            messages = @(@{ role = "user"; content = "What is 17*23? Think briefly, then answer with just the number." })
         }
     },
     @{
-        name   = "tool_call"
-        model  = $Model
-        body   = @{
-            model      = $Model
-            messages   = @(@{ role = "user"; content = "Read the file src/main.rs with the read_file tool." })
-            max_tokens = $MaxTokens
-            stream     = $true
-            tools      = @(@{
-                type     = "function"
-                function = @{
-                    name        = "read_file"
-                    description = "Read a file from the workspace"
-                    parameters  = @{
-                        type       = "object"
-                        properties = @{ path = @{ type = "string" } }
-                        required   = @("path")
-                    }
-                }
-            })
-            tool_choice = "auto"
+        name = "tool_call"; model = $Model
+        body = @{
+            model = $Model; stream = $true; max_tokens = $MaxTokens; tool_choice = "auto"; tools = @($readFile)
+            messages = @(@{ role = "user"; content = "Read the file src/main.rs with the read_file tool." })
         }
     },
     @{
-        name   = "tool_result_followup"
-        model  = $Model
-        body   = @{
-            model      = $Model
-            messages   = @(
+        name = "parallel_tools"; model = $Model
+        body = @{
+            model = $Model; stream = $true; max_tokens = $MaxTokens; tool_choice = "auto"; tools = @($readFile, $listFiles)
+            messages = @(@{ role = "user"; content = "In ONE step: read Cargo.toml with read_file AND list the src directory with list_files." })
+        }
+    },
+    @{
+        name = "tool_result_followup"; model = $Model
+        body = @{
+            model = $Model; stream = $true; max_tokens = $MaxTokens; tools = @($readFile)
+            messages = @(
                 @{ role = "user"; content = "Read the file src/main.rs with the read_file tool." },
                 @{ role = "assistant"; content = $null; tool_calls = @(@{
                     id = "call_1"; type = "function"
                     function = @{ name = "read_file"; arguments = '{"path":"src/main.rs"}' } }) },
                 @{ role = "tool"; tool_call_id = "call_1"; content = 'fn main() { println!("hi"); }' }
             )
-            max_tokens = $MaxTokens
-            stream     = $true
-            tools      = @()
+        }
+    },
+    @{
+        name = "long_prefill"; model = $Model
+        body = @{
+            model = $Model; stream = $true; max_tokens = 256
+            messages = @(@{ role = "user"; content = "Context: $prefill`nQuestion: which animal does the fox jump over? One word." })
+        }
+    },
+    @{
+        name = "error_malformed_tool"; model = $Model; allow_non_sse = $true
+        body = @{
+            model = $Model; stream = $true; max_tokens = 64
+            messages = @(@{ role = "user"; content = "hi" })
+            tools = @(@{ type = "function" })   # missing function.name etc.
         }
     }
 )
@@ -107,44 +125,61 @@ function Scrub([string]$text, [string]$key) {
     return $t
 }
 
+# server introspection for metadata.json (vLLM: /version; proxies may 404)
+$serverInfo = @{}
+foreach ($p in @("/version", "/v1/version")) {
+    try {
+        $u = ($BaseUrl -replace "/v1/?$", "") + $p
+        $r = Invoke-WebRequest -Uri $u -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 15 -UseBasicParsing
+        $serverInfo[$p.Trim('/')] = $r.Content.Substring(0, [Math]::Min(300, $r.Content.Length))
+    } catch { $serverInfo[$p.Trim('/')] = "unavailable" }
+}
+
 foreach ($case in $cases) {
-    if ($case.body.stream -ne $true) { throw "internal error: stream must be on" }
     $body = ($case.body | ConvertTo-Json -Depth 8 -Compress)
     $req = New-TemporaryFile; Set-Content $req $body -NoNewline
     $raw = New-TemporaryFile
     "CASE $($case.name) (model=$($case.model)) ..."
-    # Key passes via stdin config — never argv (process list), never disk.
+    # Key passes via stdin config - never argv (process list), never disk.
     "header = `"Authorization: Bearer $apiKey`"" | & curl.exe -sS -N --config - `
-        -H "Content-Type: application/json" `
-        -H "Cache-Control: no-cache" `
-        -d "@$req" -o $raw --max-time 300 `
-        "$BaseUrl/chat/completions"
-    if ($LASTEXITCODE -ne 0) { Remove-Item $req, $raw -ErrorAction SilentlyContinue; throw "curl failed ($LASTEXITCODE) for case $($case.name)" }
+        -H "Content-Type: application/json" -H "Cache-Control: no-cache" `
+        -d "@$req" -o $raw -w "%{http_code}" --max-time 300 `
+        "$BaseUrl/chat/completions" | ForEach-Object { $script:code = $_ }
     $sse = Get-Content $raw -Raw
-    if (-not ($sse -match "^data:" -or $sse -match "`ndata:")) {
+    $isSse = $sse -match "^data:" -or $sse -match "`ndata:"
+    if (-not $isSse -and -not $case.allow_non_sse) {
         Remove-Item $req, $raw -ErrorAction SilentlyContinue
-        throw "case $($case.name): response is not SSE (auth/model/permission problem?):`n$($sse.Substring(0, [Math]::Min(400, $sse.Length)))"
+        throw "case $($case.name): not SSE (HTTP $script:code): $($sse.Substring(0, [Math]::Min(300, $sse.Length)))"
     }
-
     $scrubbed = Scrub $sse $apiKey
-    if ($apiKey -and $scrubbed.Contains($apiKey)) {
-        throw "scrub failed: key still present; deleting capture"
-    }
+    if ($apiKey -and $scrubbed.Contains($apiKey)) { throw "scrub failed: key present; deleting capture" }
+
     $ssePath = Join-Path $outAbs "$($case.name).sse"
     Set-Content $ssePath $scrubbed -NoNewline
-
-    # parsed jsonl: one object per data line (minus the sentinel)
-    $events = $scrubbed -split "`n" | Where-Object { $_ -match "^data: " } |
-        ForEach-Object { $_.Substring(6).TrimStart() } | Where-Object { $_ -ne "[DONE]" }
-    $jlPath = Join-Path $outAbs "$($case.name).jsonl"
-    Set-Content $jlPath ($events -join "`n")
-
-    $chunks = ($events | Where-Object { $_ -and $_.Trim() }).Count
-    "      -> $chunks data chunks; wrote $([IO.Path]::GetFileName($ssePath)) + $([IO.Path]::GetFileName($jlPath))"
+    if ($isSse) {
+        $events = $scrubbed -split "`n" | Where-Object { $_ -match "^data: " } |
+            ForEach-Object { $_.Substring(6).TrimStart() } | Where-Object { $_ -ne "[DONE]" }
+        Set-Content (Join-Path $outAbs "$($case.name).jsonl") ($events -join "`n")
+        $meta = "$((($events | Where-Object { $_ }).Count)) data chunks"
+    } else {
+        $meta = "HTTP $script:code, non-SSE body ($($sse.Length) bytes)"
+    }
+    "      -> $meta"
     Remove-Item $req, $raw -ErrorAction SilentlyContinue
 }
 
+# metadata.json - fixture provenance (parser names must be filled from the
+# server config of the endpoint under test; introspectable fields only here)
+$metaObj = [ordered]@{
+    captured_at  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    endpoint     = $BaseUrl
+    models       = @{ main = $Model; fast = $FastModel }
+    server       = $serverInfo
+    tool_parser  = "unknown-server-side-flag (--tool-call-parser); see docs/VLLM.md"
+    cases        = $cases | ForEach-Object { $_.name }
+    scrubbed     = $true
+}
+$metaObj | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $outAbs "metadata.json")
 ""
-"Trace set complete in $OutDir/. Endpoint used: POST $BaseUrl/chat/completions (SSE)."
-"Models exercised: $Model, $FastModel. Add more -cases here as M1 needs them."
+"Trace set complete in $OutDir/ + metadata.json. Cases: $($cases.name -join ', ')"
 exit 0

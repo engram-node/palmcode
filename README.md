@@ -1,18 +1,18 @@
-# palmcode
+﻿# palmcode
 
 On-device, BYOK coding-agent harness for Android. The agent runs entirely on the
 phone; the only network traffic is the user's own LLM requests to an
-OpenAI-compatible endpoint they configure. No backend, no accounts, no
+vLLM-serving endpoint they configure (docs/VLLM.md). No backend, no accounts, no
 telemetry.
 
-Distributed via F-Droid. License: GPL-3.0-only.
+Distributed via F-Droid. License: Apache-2.0.
 
 ## Status
 
-**Milestone 0 (skeleton): complete** — repo layout, pinned toolchains, UniFFI
+**Milestone 0 (skeleton): complete** â€” repo layout, pinned toolchains, UniFFI
 FFI path proven on an emulator, cargo-ndk build wired into Gradle, exec-via-
 symlink spike passed, git cross-build spike passed. Both risk spikes green;
-see `docs/VERIFY.md` and `docs/decisions/` (0001–0007). M1 (provider + loop)
+see `docs/VERIFY.md` and `docs/decisions/` (0001â€“0007). M1 (provider + loop)
 up next.
 
 ## Build

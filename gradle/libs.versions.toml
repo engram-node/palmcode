@@ -9,6 +9,8 @@ activity-compose = "1.11.0"
 lifecycle = "2.9.4"
 core-ktx = "1.17.0"
 jna = "5.19.1"
+markdown-renderer = "0.40.2"   # Apache-2.0; mikepenz/multiplatform-markdown-renderer (>=0.45 needs API 37)
+rustls-verifier-android = "0.1.1"  # bundled AAR: core/vendor/rustls-platform-verifier-android
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -27,3 +29,7 @@ core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx
 # license; we use the Apache-2.0 option. The "@aar" classifier is required for
 # the Android native dispatch library.
 jna-android = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+markdown-m3 = { group = "com.mikepenz", name = "multiplatform-markdown-renderer-m3", version.ref = "markdown-renderer" }
+# Resolved from the vendored on-disk maven repo (see settings.gradle.kts);
+# pairs with the `rustls-platform-verifier` 0.6 crate in core/Cargo.lock.
+rustls-verifier-android = { group = "rustls", name = "rustls-platform-verifier", version.ref = "rustls-verifier-android" }

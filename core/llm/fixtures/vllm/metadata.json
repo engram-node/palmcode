@@ -1,0 +1,23 @@
+{
+    "captured_at":  "2026-10-10T20:19:12Z",
+    "endpoint":  "https://grid.ai.juspay.net/v1",
+    "models":  {
+                   "fast":  "glm-5.3-flash",
+                   "main":  "glm-latest"
+               },
+    "server":  {
+                   "version":  "unavailable",
+                   "v1/version":  "unavailable"
+               },
+    "tool_parser":  "unknown-server-side-flag (--tool-call-parser); see docs/VLLM.md",
+    "cases":  [
+                  "simple",
+                  "reasoning",
+                  "tool_call",
+                  "parallel_tools",
+                  "tool_result_followup",
+                  "long_prefill",
+                  "error_malformed_tool"
+              ],
+    "scrubbed":  true
+}

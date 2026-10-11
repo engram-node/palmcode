@@ -1,6 +1,7 @@
 # 0005: Project license GPL-3.0-only; JNA under its Apache-2.0 option
 
-Date: 2026-10-10. Status: accepted.
+Date: 2026-10-10. Status: superseded by 0009 (project relicensed to
+Apache-2.0 on 2026-10-11). Kept for history; the JNA analysis still stands.
 
 ## Decision
 
