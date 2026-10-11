@@ -43,6 +43,8 @@ Verified via the probe above (identical app, post-rename `dev.palmcode`).
 | Date | 2026-10-10 |
 | FFI greeting | `palmcode core 0.1.0 online, hello android` |
 | Exec-via-symlink | `exit=42 out="exec-probe ok pid=16563" (10 ms)` |
+| userland busybox 1.38.0 arm64 executes on-device | physical (motorola edge 50 neo, Android 16, 2026-10-11) | banner OK; 367 applets; `sh -c 'read x...'` pipe OK; `awk` OK |
+| userland ripgrep 15.2.0 arm64 executes on-device | physical (same device, 2026-10-11) | `rg --version` OK; literal match + `-c` count OK |
 | Symlink target | `/data/user/0/dev.palmcode/files/bin/probe -> …/lib/arm64/libexecprobe.so` |
 | 16 KB alignment | libandroidx.graphics.path.so: ok; libexecprobe.so: ok; libjnidispatch.so: ok; libpalmcode_ffi.so: ok |
 | git on-device | git version 2.56.0; init/add/commit x2/log/status OK; 3.55 MB |
