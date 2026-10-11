@@ -33,6 +33,28 @@ Paste-area template — one row per device, newest first:
 | 16 KB alignment | <lib*.so: ok; …> |
 | git on-device | <version; cycle result; stripped size> |
 
+## M1 device acceptance — motorola edge 50 neo, Android 16, 2026-10-11
+
+Debug APK, driven via adb uiautomator; numbers also cross-checked against the
+on-device SQLite (`palmcode.db` pull) and the host mock server log.
+
+| Check | Result |
+|---|---|
+| Cold start (force-stop → `am start -W`) | TotalTime **1038 ms** (< 1.2 s) |
+| Provider probe vs Grid from the phone | models 34 / tokenize 403→heuristic / tool_choice OK / reasoning_content / final-chunk usage / cached_tokens exposed / **TTFT 410 ms, 51 tok/s**; panel + overrides shown |
+| Keystore key survives app restart | force-stop + relaunch → straight to session list, no re-entry; `logcat -d` grep for key material: **0 hits** |
+| Streaming turn vs Grid | reasoning collapsible + markdown answer + metrics `ttft 2142 ms · 7202.0 tok/s · 83 tok · cache 0%`; events+parts persisted (seq 1–8, coalesced) |
+| http:// endpoint over `adb reverse` | cleartext banner in setup (before save) + persistent "http cleartext" chip in chat |
+| Stop mid-stream | UI returned to Send; **mock server printed `client-disconnected observed`** |
+| Jank @100 tok/s (bench mock, 20 s window) | **0.40% janky (13/3263, gfxinfo modern metric)** |
+| Kill mid-stream (`am force-stop`) | relaunch → session statuses `interrupted`, partial text persisted; **Resume** row rendered at message end; tapping Resume regenerated into a NEW assistant message (msg 8 kept as partial) and stopped cleanly |
+| Session list | 3 sessions, correct status/model/date rows; newest first |
+
+Known cosmetic issue found and fixed during this run: root composables lacked
+`safeDrawingPadding` (header collided with the status bar). Fixed in this
+same commit. Driving notes (screen sleep, `&#183;` entities) are in
+docs/NOTES.md.
+
 ## Verified on physical hardware
 
 Verified via the probe above (identical app, post-rename `dev.palmcode`).

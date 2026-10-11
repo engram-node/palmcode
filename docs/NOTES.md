@@ -2,6 +2,29 @@
 
 Not code yet. Each item names the milestone that consumes it.
 
+## UI-driving / device-session gotchas (any milestone that adb-drives the phone)
+
+- The phone display sleeps during long adb runs and taps/dumps get weird
+  (half-painted screens, keyevents landing in other apps). Set
+  `settings put system screen_off_timeout 600000` + `input keyevent KEYCODE_WAKEUP`
+  + `wm dismiss-keyguard` at the start of every session. Restore the timeout
+  afterwards.
+- `input text` needs `%s` for spaces; some `%`-combos get eaten by the IME.
+  Prefer short messages.
+- uiautomator XML escapes non-ASCII as entities (`·` → `&#183;`); scripts
+  saved as ANSI (no BOM) make PowerShell mangle XPath literals containing
+  them. Match on ASCII-only substrings (timestamps `:` work for status rows).
+- `<` in TextButton labels is stored as `&lt; Chats` in the dump; XPath with
+  a literal `<` will never match. Use `contains(@text,'Chats')`.
+
+## M2 (chat UX follow-ups)
+
+- A long streaming message fills the viewport: the metrics/interrupted/Resume
+  footer sits below the fold until the user scrolls. Consider pinning the
+  footer or auto-scrolling to the message END when a turn finishes.
+- `MessageFinished.decode_tps` can show silly values (7202 tok/s) when the
+  whole decode lands in ~10 ms — clamp or suppress when decode window < 250 ms.
+
 ## M3 (userland wiring)
 
 - **busybox applet symlinks must be named after applets**, with the binary

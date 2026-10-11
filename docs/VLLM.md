@@ -115,3 +115,22 @@ M1 acceptance for the SSE parser:
 prints a pasteable table (models + max_model_len, tool_choice status +
 remediation, reasoning field name, /tokenize status, usage-stats flavor,
 TTFT/tok-s sample). Run it before filing endpoint bugs.
+
+## Observed behavior — Grid gateway (`https://grid.ai.juspay.net/v1`)
+
+Verified end-to-end **from the app on a physical phone** (motorola edge 50
+neo, Android 16, debug build, in-app probe 2026-10-11):
+
+| Detection | Result |
+|---|---|
+| `/models` | 200, 34 models; `max_model_len` **absent on every entry** (context window falls back to the stored default 128k) |
+| `/tokenize` | **HTTP 403** → heuristic chars/3.5 counting is the production path here |
+| `tool_choice: "auto"` | accepted (no `--enable-auto-tool-choice` remediation needed) |
+| Reasoning | streamed via `reasoning_content` |
+| `stream_options.include_usage` | **ignored** → final-chunk usage only; continuous tick disabled |
+| Cache counters | `cached_tokens` present in final usage |
+| Sample chat | TTFT **410 ms**, ~51 tok/s (probe), full turn ttft 2142 ms on first message |
+
+Consequences baked into the runtime: capability flags prefill from the probe
+but stay user-overridable; token counts for context budgeting come from the
+heuristic; per-turn usage arrives only at `finish`.

@@ -105,9 +105,11 @@ fun cargoEnvironment(ndkDir: File): Map<String, String> = buildMap {
             put("PATH", front.joinToString(File.pathSeparator) + File.pathSeparator + System.getenv("PATH"))
         }
         // cc-rs would otherwise find a stray 32-bit C:\MinGW gcc on PATH.
-        // Target-specific CC_<triple> set by cargo-ndk still wins for Android.
-        gnuSelfContained?.resolve("x86_64-w64-mingw32-gcc.exe")
-            ?.takeIf { it.isFile }
+        // A FULL gcc is required: uniffiBindgen's `cargo run` builds
+        // libsqlite3-sys for the HOST, and rustup's self-contained gcc has no
+        // cc1. Target-specific CC_<triple> set by cargo-ndk still wins for Android.
+        (File("C:\\msys64\\mingw64\\bin\\gcc.exe").takeIf { it.isFile }
+            ?: gnuSelfContained?.resolve("x86_64-w64-mingw32-gcc.exe")?.takeIf { it.isFile })
             ?.let { put("CC", it.absolutePath) }
     }
 }
@@ -219,4 +221,10 @@ dependencies {
     // UniFFI Kotlin bindings run on JNA (Apache-2.0 licensed). @aar required.
     // Keep in sync with [versions] jna in gradle/libs.versions.toml.
     implementation("net.java.dev.jna:jna:5.19.1@aar")
+    // rustls-platform-verifier Android companion AAR (platform trust store for
+    // HTTPS on Android); served from the vendored crate's on-disk maven repo.
+    implementation(libs.rustls.verifier.android)
+    // Markdown bubbles in chat; tail-only reparse is achieved by per-message
+    // snapshot state (see ChatScreen), not by renderer-level caching.
+    implementation(libs.markdown.m3)
 }

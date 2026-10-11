@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -51,6 +51,10 @@ pub struct MockServer {
     pub hits: Arc<AtomicU32>,
     /// Bodies of received requests (assertion material).
     pub bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Per-stream server-side span (header write .. final piece write) —
+    /// the bench subtracts this MEASURED span instead of the scripted
+    /// delay, which is meaningless on coarse-timer hosts (Windows ~15 ms).
+    pub stream_spans: Arc<Mutex<Vec<Duration>>>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -83,14 +87,25 @@ impl Default for MockConfig {
 
 pub async fn serve(cfg: MockConfig) -> std::io::Result<MockServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    serve_on(listener, cfg).await
+}
+
+/// Bind your own listener (e.g. a fixed port for `adb reverse`).
+pub async fn serve_on(listener: TcpListener, cfg: MockConfig) -> std::io::Result<MockServer> {
     let port = listener.local_addr()?.port();
     let disconnected = Arc::new(AtomicBool::new(false));
     let hits = Arc::new(AtomicU32::new(0));
     let bodies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let stream_spans = Arc::new(Mutex::new(Vec::<Duration>::new()));
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 
     {
-        let (disconnected, hits, bodies) = (disconnected.clone(), hits.clone(), bodies.clone());
+        let (disconnected, hits, bodies, stream_spans) = (
+            disconnected.clone(),
+            hits.clone(),
+            bodies.clone(),
+            stream_spans.clone(),
+        );
         // scripts are consumed per CHAT REQUEST (not per connection:
         // /models and /tokenize must not advance the queue)
         let scripts = Arc::new(Mutex::new(cfg.scripts.into_iter().collect::<Vec<_>>()));
@@ -100,11 +115,12 @@ pub async fn serve(cfg: MockConfig) -> std::io::Result<MockServer> {
                     _ = &mut stop_rx => break,
                     a = listener.accept() => match a { Ok(v) => v, Err(_) => break },
                 };
-                let (disconnected, hits, bodies, scripts) = (
+                let (disconnected, hits, bodies, scripts, stream_spans) = (
                     disconnected.clone(),
                     hits.clone(),
                     bodies.clone(),
                     scripts.clone(),
+                    stream_spans.clone(),
                 );
                 let cfg_models = cfg.models_body.clone();
                 let (tok_status, tok_count) = (cfg.tokenize_status, cfg.tokenize_count);
@@ -118,6 +134,7 @@ pub async fn serve(cfg: MockConfig) -> std::io::Result<MockServer> {
                         hits,
                         bodies,
                         disconnected,
+                        stream_spans,
                     )
                     .await;
                 });
@@ -129,6 +146,7 @@ pub async fn serve(cfg: MockConfig) -> std::io::Result<MockServer> {
         disconnected,
         hits,
         bodies,
+        stream_spans,
         shutdown: Some(stop_tx),
     })
 }
@@ -151,6 +169,7 @@ async fn handle(
     hits: Arc<AtomicU32>,
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     disconnected: Arc<AtomicBool>,
+    stream_spans: Arc<Mutex<Vec<Duration>>>,
 ) -> std::io::Result<()> {
     hits.fetch_add(1, Ordering::SeqCst);
     // --- read request (headers + content-length body) ---
@@ -273,6 +292,7 @@ async fn handle(
     } else {
         script.body.chunks(script.chunk_size).collect()
     };
+    let stream_t0 = Instant::now();
     for p in pieces {
         if script.inter_chunk_delay > Duration::ZERO {
             tokio::time::sleep(script.inter_chunk_delay).await;
@@ -282,6 +302,7 @@ async fn handle(
             return Ok(());
         }
     }
+    stream_spans.lock().unwrap().push(stream_t0.elapsed());
     if script.hang_after_body {
         // hold the stream open: client cancellation must be visible here
         let mut one = [0u8; 1];

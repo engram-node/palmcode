@@ -160,7 +160,8 @@ pub enum CoreEvent {
     },
 }
 
-#[uniffi::export]
+// `foreign`: Kotlin implements this trait; the Rust engine calls in.
+#[uniffi::export(foreign)]
 pub trait CoreEventListener: Send + Sync {
     fn on_events(&self, events: Vec<CoreEvent>);
 }
@@ -419,7 +420,7 @@ pub fn core_shutdown() {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_palmcode_app_PalmcodeCore_nativeInitAndroid(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,
