@@ -26,6 +26,7 @@ pub const SEARCH: Limits = Limits {
     max_bytes: 128 * 1024,
 };
 
+#[derive(Debug)]
 pub struct Capped {
     pub text: String,
     pub total_lines: usize,
