@@ -58,7 +58,7 @@ mod tests {
         assert!(d.starts_with("--- a/a.rs\n+++ b/a.rs\n@@\n"));
         // context prefix " " + source line; +/- lines keep their own indent
         assert!(
-            d.contains("      one();\n-    old_call();\n+    new_call();\n     three();\n"),
+            d.contains("     one();\n-    old_call();\n+    new_call();\n     three();\n"),
             "{d}"
         );
         assert!(!d.contains("five();"), "only 1 context line: {d}");

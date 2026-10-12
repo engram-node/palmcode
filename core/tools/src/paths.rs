@@ -22,15 +22,26 @@ impl RootSet {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
         let mut out = Vec::new();
         for r in roots {
-            let canon = std::fs::canonicalize(&r)
-                .map_err(|e| ToolError::BadPath(format!("workspace root {}: {e}", r.display())))?;
-            if !canon.is_dir() {
+            // shortcut: Android FUSE (/storage/emulated, /sdcard) blocks
+            // realpath() traversal for app processes — keep the lexical root
+            // and containment stays lexical too; upgrade: canonicalize via a
+            // SAF document-id instead of realpath.
+            let root = std::fs::canonicalize(&r)
+                .map(|c| strip_verbatim(&c))
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        root = %r.display(),
+                        "canonicalize failed; using lexical workspace root"
+                    );
+                    lexical_normalize(&r)
+                });
+            if !root.is_dir() {
                 return Err(ToolError::BadPath(format!(
                     "workspace root is not a directory: {}",
-                    canon.display()
+                    root.display()
                 )));
             }
-            out.push(strip_verbatim(&canon));
+            out.push(root);
         }
         Ok(Self { roots: out })
     }
@@ -83,9 +94,14 @@ impl RootSet {
         let norm = lexical_normalize(&joined);
 
         // 2. Canonicalize the deepest existing ancestor to resolve symlinks,
-        //    then re-append the non-existent tail.
+        //    then re-append the non-existent tail. When canonicalize is
+        //    blocked (Android FUSE roots, see RootSet::new) fall back to the
+        //    lexical form — the same basis the roots use, so containment
+        //    stays consistent.
         let resolved = if norm.exists() {
-            strip_verbatim(&std::fs::canonicalize(&norm)?)
+            std::fs::canonicalize(&norm)
+                .map(|c| strip_verbatim(&c))
+                .unwrap_or_else(|_| norm.clone())
         } else {
             let mut ancestor = norm.clone();
             let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -101,7 +117,9 @@ impl RootSet {
                     None => return Err(ToolError::BadPath(format!("no such path: {user}"))),
                 }
             }
-            let mut base = strip_verbatim(&std::fs::canonicalize(&ancestor)?);
+            let mut base = std::fs::canonicalize(&ancestor)
+                .map(|c| strip_verbatim(&c))
+                .unwrap_or_else(|_| ancestor.clone());
             for comp in tail.iter().rev() {
                 base.push(comp);
             }
