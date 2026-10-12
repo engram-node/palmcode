@@ -247,6 +247,23 @@ pub fn run(args: &Args, roots: &RootSet, reads: &ReadCache) -> Result<String> {
     Ok(notes.join("\n"))
 }
 
+/// Every file an envelope mentions (agent: preimage capture before running).
+pub fn mentioned_files(patch: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("*** ") {
+            for kind in ["Add File: ", "Delete File: ", "Update File: "] {
+                if let Some(p) = rest.strip_prefix(kind) {
+                    out.push(p.trim().to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn schema() -> serde_json::Value {
     serde_json::json!({
         "name": "apply_patch",

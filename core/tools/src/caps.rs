@@ -60,7 +60,9 @@ impl Spiller {
         &self.dir
     }
 
-    fn spill(&self, text: &str) -> Result<PathBuf> {
+    /// Explicit spill for callers that already know the payload is over cap
+    /// (e.g. large preimages captured by the agent).
+    pub fn spill_file(&self, text: &str) -> Result<PathBuf> {
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
         let tag = blake3::hash(text.as_bytes()).to_hex();
         let path = self.dir.join(format!("spill-{n}-{}.txt", &tag[..8]));
@@ -81,7 +83,7 @@ impl Spiller {
                 spilled_to: None,
             });
         }
-        let spilled = self.spill(&text)?;
+        let spilled = self.spill_file(&text)?;
         // Byte-cut at a char boundary; then also respect the line cap on
         // the kept head.
         let mut cut = total_bytes.min(limits.max_bytes);

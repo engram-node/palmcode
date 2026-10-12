@@ -8,7 +8,10 @@ publish = false
 
 [dependencies]
 palmcode-llm = { path = "../llm" }
+palmcode-perms = { path = "../perms" }
 palmcode-store = { path = "../store" }
+palmcode-tools = { path = "../tools" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

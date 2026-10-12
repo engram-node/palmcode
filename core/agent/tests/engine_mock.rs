@@ -127,7 +127,12 @@ fn send_stream_finish_persist() {
             | Event::MessageFinished { seq, .. }
             | Event::Interrupted { seq, .. }
             | Event::TurnError { seq, .. }
-            | Event::Compacted { seq, .. } => *seq,
+            | Event::Compacted { seq, .. }
+            | Event::ToolStarted { seq, .. }
+            | Event::ToolFinished { seq, .. }
+            | Event::ApprovalRequested { seq, .. }
+            | Event::ApprovalResolved { seq, .. }
+            | Event::AutoApproveEdits { seq, .. } => *seq,
         })
         .collect();
     assert!(

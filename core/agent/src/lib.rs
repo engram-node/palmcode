@@ -3,7 +3,7 @@
 //! over `Event`s; deltas are coalesced to <= 1 batch per frame interval.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +25,24 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(1500);
 
 const SYSTEM_PROMPT: &str = "You are palmcode, a coding assistant running on-device inside an Android app. \
      Be concise and precise. In this build no file/shell tools are available.";
+
+const SYSTEM_PROMPT_TOOLS: &str = "You are palmcode, a coding agent running on-device inside an Android app. \
+You work directly against the user's workspace with the given file tools. \
+Be concise and precise. Prefer editing the smallest possible region. \
+Never invent file contents: read before you write, grep before you edit. \
+Never touch paths outside the workspace; never read secret files (.env, keys) unless they are the task.";
+
+/// Byte-stable prefix + trailing environment block (deliverable I): the
+/// workspace path lives at the END so the stable head is cache-friendly.
+fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>) -> String {
+    match (tools, workspace) {
+        (Some(_), Some(ws)) => format!(
+            "{SYSTEM_PROMPT_TOOLS}\n\n# Environment\nWorkspace root (all tool paths are relative to it): {}",
+            ws.display()
+        ),
+        _ => SYSTEM_PROMPT.to_string(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public event model
@@ -93,6 +111,49 @@ pub enum Event {
         session_id: String,
         dropped_messages: usize,
     },
+    /// M2: a tool call began executing (or was decided against).
+    ToolStarted {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        name: String,
+        /// primary path argument when the tool has one (card subtitle)
+        path: Option<String>,
+    },
+    ToolFinished {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        ok: bool,
+        duration_ms: u64,
+        /// first chars of the result/error for the collapsed card
+        preview: String,
+    },
+    /// The model hit an Ask rule; UI shows the sheet and calls
+    /// `resolve_approval`. Tool output never triggers this.
+    ApprovalRequested {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        request_id: u64,
+        tool: String,
+        path: String,
+        detail: String,
+    },
+    ApprovalResolved {
+        seq: u64,
+        session_id: String,
+        request_id: u64,
+        approved: bool,
+    },
+    /// "accept edits for this session" is ON (persistent banner).
+    AutoApproveEdits {
+        seq: u64,
+        session_id: Option<String>,
+        on: bool,
+    },
 }
 
 pub trait EventSink: Send + Sync {
@@ -148,13 +209,52 @@ pub enum EngineError {
     Store(#[from] palmcode_store::StoreError),
     #[error("no resumable turn on this session")]
     NothingToResume,
+    #[error("workspace/tools: {0}")]
+    Tools(String),
 }
 
 // ---------------------------------------------------------------------------
 
+/// How an approval sheet answer applies ("deny" == approved:false + Once).
+pub enum ApprovalScope {
+    Once,
+    Session,
+    Project,
+}
+
 struct Inner {
     client: Option<Client>,
     cfg: Option<Arc<FrozenCfg>>,
+}
+
+/// Per-session tool execution context. `read` is session-scoped by spec;
+/// project rules are loaded per workspace once.
+pub(crate) struct ToolsCtx {
+    workspace_root: PathBuf,
+    roots: palmcode_tools::RootSet,
+    reads: palmcode_tools::ReadCache,
+    spill: palmcode_tools::Spiller,
+    perms: palmcode_perms::Engine,
+}
+
+impl ToolsCtx {
+    /// `spill_root` must be app-private storage (the workspace may live in
+    /// shared/external storage and goes through permission walkups).
+    fn open(workspace_root: &Path, spill_root: &Path) -> Result<Self, EngineError> {
+        let roots = palmcode_tools::RootSet::new(vec![workspace_root.to_path_buf()])
+            .map_err(|e| EngineError::Tools(e.to_string()))?;
+        let spill = palmcode_tools::Spiller::new(spill_root)
+            .map_err(|e| EngineError::Tools(e.to_string()))?;
+        let perms =
+            palmcode_perms::Engine::load(workspace_root, None).map_err(EngineError::Tools)?;
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            roots,
+            reads: palmcode_tools::ReadCache::new(),
+            spill,
+            perms,
+        })
+    }
 }
 
 struct FrozenCfg {
@@ -176,6 +276,22 @@ pub struct Engine {
     inner: Mutex<Inner>,
     inflight: AsyncMutex<HashMap<String, oneshot::Sender<()>>>,
     emitter: Emitter,
+    /// single workspace root for now; M2-E swaps this for the workspaces table
+    workspace: Mutex<Option<PathBuf>>,
+    /// app-private spill base (db's directory), per-session subdirs
+    spill_base: PathBuf,
+    tools: Mutex<HashMap<String, Arc<ToolsCtx>>>,
+    approvals: Arc<Mutex<HashMap<u64, ApprovalTx>>>,
+    approval_seq: AtomicU64,
+    turn_overrides: Arc<Mutex<TurnOverrides>>,
+}
+
+type ApprovalTx = oneshot::Sender<(bool, ApprovalScope)>;
+
+/// Per-request knobs layered over provider defaults (chat-input override UI).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TurnOverrides {
+    pub max_output_tokens: Option<u32>,
 }
 
 impl Engine {
@@ -189,6 +305,10 @@ impl Engine {
             .build()
             .expect("tokio runtime");
         let emitter = Emitter::start(rt.handle().clone(), sink.clone());
+        let spill_base = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("spill");
         let engine = Self {
             rt,
             store,
@@ -199,6 +319,12 @@ impl Engine {
             }),
             inflight: AsyncMutex::new(HashMap::new()),
             emitter,
+            workspace: Mutex::new(None),
+            spill_base,
+            tools: Mutex::new(HashMap::new()),
+            approvals: Arc::new(Mutex::new(HashMap::new())),
+            approval_seq: AtomicU64::new(0),
+            turn_overrides: Arc::new(Mutex::new(TurnOverrides::default())),
         };
         // crash recovery: anything left streaming is marked interrupted
         for (session, message_id) in engine.store.mark_all_interrupted()? {
@@ -208,7 +334,82 @@ impl Engine {
                 message_id,
             });
         }
+        // a tool left "pending" means the app died mid-execution: never
+        // re-run; history replay synthesizes an "unknown outcome" result
+        engine.store.mark_pending_tools_interrupted()?;
         Ok(engine)
+    }
+
+    // ---------- M2: workspace + approvals ----------
+
+    /// Enable tools against a workspace root. Tools stay OFF (pure chat)
+    /// until a workspace is set.
+    pub fn set_workspace(&self, root: &str) -> Result<(), EngineError> {
+        let p = PathBuf::from(root);
+        // validate once here so misconfig surfaces immediately
+        palmcode_tools::RootSet::new(vec![p.clone()])
+            .map_err(|e| EngineError::Tools(e.to_string()))?;
+        palmcode_perms::Engine::load(&p, None).map_err(EngineError::Tools)?;
+        self.tools.lock().unwrap().clear(); // roots/perms changed: redo ctxs
+        *self.workspace.lock().unwrap() = Some(p);
+        tracing::info!(workspace = root, "tools enabled (workspace set)");
+        Ok(())
+    }
+
+    pub fn workspace(&self) -> Option<String> {
+        self.workspace
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.display().to_string())
+    }
+
+    pub fn clear_workspace(&self) {
+        *self.workspace.lock().unwrap() = None;
+        self.tools.lock().unwrap().clear();
+    }
+
+    /// Per-session tools context (lazily built; dies with workspace change).
+    fn tools_ctx(&self, session_id: &str) -> Option<Arc<ToolsCtx>> {
+        let ws = self.workspace.lock().unwrap().clone()?;
+        let mut map = self.tools.lock().unwrap();
+        if let Some(ctx) = map.get(session_id) {
+            return Some(ctx.clone());
+        }
+        let spill = self.spill_base.join(session_id);
+        let ctx = Arc::new(ToolsCtx::open(&ws, &spill).ok()?);
+        map.insert(session_id.to_string(), ctx.clone());
+        Some(ctx)
+    }
+
+    /// UI answer for ApprovalRequested.
+    pub fn resolve_approval(&self, request_id: u64, approved: bool, scope: ApprovalScope) {
+        let tx = self.approvals.lock().unwrap().remove(&request_id);
+        if let Some(tx) = tx {
+            let _ = tx.send((approved, scope));
+        }
+    }
+
+    /// Override the next turns' max output tokens (None = provider default).
+    pub fn set_max_output_tokens(&self, v: Option<u32>) {
+        self.turn_overrides.lock().unwrap().max_output_tokens = v;
+    }
+
+    /// "Accept edits for this session": Ask -> Allow for write tools.
+    pub fn set_accept_edits(&self, session_id: &str, on: bool) {
+        if on {
+            if let Some(ctx) = self.tools.lock().unwrap().get(session_id) {
+                ctx.perms.set_accept_edits_for_session();
+            }
+            if let Some(ctx) = self.tools_ctx(session_id) {
+                ctx.perms.set_accept_edits_for_session();
+            }
+        }
+        self.emitter.emit_now(Event::AutoApproveEdits {
+            seq: self.next_seq(),
+            session_id: Some(session_id.to_string()),
+            on,
+        });
     }
 
     fn next_seq(&self) -> u64 {
@@ -313,6 +514,7 @@ impl Engine {
             }
         };
         let (client, cfg) = client_cfg;
+        let tools = self.tools_ctx(session_id);
 
         // user turn: stored + finalized right away (it's complete input)
         let user_mid = self.store.begin_message(session_id, "user", false)?;
@@ -333,7 +535,10 @@ impl Engine {
             .finalize_message(session_id, user_mid, 0, false)?;
 
         // api history: system + all finalized non-interrupted + this user
-        let mut api_messages = vec![Message::system(SYSTEM_PROMPT)];
+        let mut api_messages = vec![Message::system(system_prompt(
+            tools.as_ref(),
+            self.workspace.lock().unwrap().as_deref(),
+        ))];
         api_messages.extend(self.api_history(session_id)?);
         let count_task: tokio::task::JoinHandle<palmcode_llm::count::TokenCount> = {
             let client = client.clone();
@@ -389,22 +594,79 @@ impl Engine {
             api_messages,
             store_ptr: self as *const Engine,
             cancel_rx,
+            tools,
         }));
         Ok(assistant_mid)
     }
 
-    /// Skip the interrupted tail when rebuilding API history.
+    /// Replay history; completed tool exchanges become assistant-with-calls
+    /// plus tool results. An interrupted tail keeps ONLY its tool calls —
+    /// unfinished ones get an "interrupted, outcome unknown" result — so the
+    /// model continues instead of blindly re-running; partial text history
+    /// is dropped as in M1.
     fn api_history(&self, session_id: &str) -> Result<Vec<Message>, EngineError> {
         let rows = self.store.transcript(session_id)?;
         let mut out = Vec::new();
         for (m, parts) in &rows {
-            if m.interrupted || m.streaming {
+            if m.streaming {
                 continue;
             }
             let text = join_kind(parts, "text");
+            if m.interrupted && m.role == "assistant" {
+                let calls = self.store.tool_calls_for(m.id)?;
+                if !calls.is_empty() {
+                    let specs: Vec<palmcode_llm::types::ToolCallSpec> = calls
+                        .iter()
+                        .map(|c| palmcode_llm::types::ToolCallSpec {
+                            id: c.id.clone(),
+                            name: c.name.clone(),
+                            arguments: c.args.clone(),
+                        })
+                        .collect();
+                    out.push(Message::assistant_tool_calls(specs, None));
+                    for c in &calls {
+                        out.push(Message::tool(
+                            c.id.clone(),
+                            c.output
+                                .clone()
+                                .unwrap_or_else(|| "[interrupted, outcome unknown]".into()),
+                        ));
+                    }
+                }
+                continue;
+            }
+            if m.interrupted {
+                continue;
+            }
             match m.role.as_str() {
                 "user" => out.push(Message::user(text)),
-                "assistant" => out.push(Message::assistant(text)),
+                "assistant" => {
+                    let calls = self.store.tool_calls_for(m.id)?;
+                    if calls.is_empty() {
+                        out.push(Message::assistant(text));
+                    } else {
+                        let specs: Vec<palmcode_llm::types::ToolCallSpec> = calls
+                            .iter()
+                            .map(|c| palmcode_llm::types::ToolCallSpec {
+                                id: c.id.clone(),
+                                name: c.name.clone(),
+                                arguments: c.args.clone(),
+                            })
+                            .collect();
+                        out.push(Message::assistant_tool_calls(
+                            specs,
+                            if text.is_empty() { None } else { Some(text) },
+                        ));
+                        for c in &calls {
+                            out.push(Message::tool(
+                                c.id.clone(),
+                                c.output
+                                    .clone()
+                                    .unwrap_or_else(|| "[interrupted, outcome unknown]".into()),
+                            ));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -450,7 +712,11 @@ impl Engine {
             }
         };
         let (client, cfg) = client_cfg;
-        let mut api_messages = vec![Message::system(SYSTEM_PROMPT)];
+        let tools = self.tools_ctx(session_id);
+        let mut api_messages = vec![Message::system(system_prompt(
+            tools.as_ref(),
+            self.workspace.lock().unwrap().as_deref(),
+        ))];
         api_messages.extend(self.api_history(session_id)?);
         let count = palmcode_llm::count::TokenCount {
             tokens: palmcode_llm::count::heuristic_tokens(&api_messages),
@@ -486,6 +752,7 @@ impl Engine {
             api_messages,
             store_ptr: self as *const Engine,
             cancel_rx,
+            tools,
         }));
         Ok(())
     }
@@ -542,45 +809,53 @@ struct TurnTask {
     api_messages: Vec<Message>,
     store_ptr: *const Engine,
     cancel_rx: oneshot::Receiver<()>,
+    tools: Option<Arc<ToolsCtx>>,
 }
 // Engine outlives every turn task (shutdown joins the runtime), and the
 // store is behind internal Mutexes.
 unsafe impl Send for TurnTask {}
 
-async fn run_turn(task: TurnTask) {
-    let TurnTask {
-        session_id,
-        message_id,
-        client,
-        cfg,
-        api_messages,
-        store_ptr,
-        mut cancel_rx,
-    } = task;
-    let engine: &Engine = unsafe { &*store_ptr };
+/// Result of one assistant iteration (one HTTP request).
+struct IterationFlow {
+    outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError>,
+    /// tool calls accumulated this iteration
+    tool_calls: Vec<palmcode_llm::types::ToolCallSpec>,
+    usage: Option<palmcode_llm::types::Usage>,
+    ttft: Option<Duration>,
+    cancelled: bool,
+}
 
-    let request = ChatRequest {
-        model: cfg.main_model.clone(),
-        messages: api_messages,
-        max_tokens: cfg.max_output_tokens,
-        continuous_usage: cfg.continuous_usage,
-        sampling: cfg.sampling.clone(),
-        extra_body: cfg.extra_body.clone(),
-        tools: None,
-    };
+/// Mutable per-turn accumulators shared across iterations.
+struct Merge<'a> {
+    text: &'a mut String,
+    reasoning: &'a mut String,
+    cancel_rx: &'a mut oneshot::Receiver<()>,
+}
 
+/// Stream one request, appending into the turn's cumulative full_text /
+/// full_reasoning (event snapshots + periodic snapshots use the merged
+/// text so the UI sees one continuous assistant message).
+async fn stream_once(
+    engine: &Engine,
+    session_id: &str,
+    message_id: i64,
+    client: &Client,
+    request: &ChatRequest,
+    acc: &mut Merge<'_>,
+) -> IterationFlow {
+    let full_text = &mut *acc.text;
+    let full_reasoning = &mut *acc.reasoning;
+    let cancel_rx = &mut *acc.cancel_rx;
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientEvent>();
-    let chat = client.chat(&request, tx);
+    let chat = client.chat(request, tx);
     tokio::pin!(chat);
 
-    let mut text = String::new();
-    let mut reasoning = String::new();
     let mut reasoning_closed = false;
     let mut usage: Option<palmcode_llm::types::Usage> = None;
     let mut ttft: Option<Duration> = None;
-    let turn_start = Instant::now();
     let mut last_snapshot_write = Instant::now();
     let mut cancelled = false;
+    let mut accumulator = palmcode_llm::accumulator::ToolAccumulator::new();
 
     // Process one client event (shared by the select loop and the final
     // drain — when the chat future resolves its last deltas may still be
@@ -590,46 +865,52 @@ async fn run_turn(task: TurnTask) {
             match $ev {
                 ClientEvent::FirstToken { ttft: t } => ttft = Some(t),
                 ClientEvent::Text(t) => {
-                    if !reasoning_closed && !reasoning.is_empty() {
+                    if !reasoning_closed && !full_reasoning.is_empty() {
                         // reasoning part closes when the answer starts
-                        let _ =
-                            engine
-                                .store
-                                .put_part(&session_id, message_id, "reasoning", &reasoning);
+                        let _ = engine.store.put_part(
+                            session_id,
+                            message_id,
+                            "reasoning",
+                            full_reasoning,
+                        );
                         reasoning_closed = true;
                     }
-                    text.push_str(&t);
+                    full_text.push_str(&t);
                     engine.emitter.emit(Event::TextDelta {
                         seq: engine.next_seq(),
-                        session_id: session_id.clone(),
+                        session_id: session_id.to_string(),
                         message_id,
-                        snapshot: text.clone(),
+                        snapshot: full_text.clone(),
                     });
                     if last_snapshot_write.elapsed() >= SNAPSHOT_INTERVAL {
                         let _ = engine
                             .store
-                            .put_part(&session_id, message_id, "text", &text);
+                            .put_part(session_id, message_id, "text", full_text);
                         last_snapshot_write = Instant::now();
                     }
                 }
                 ClientEvent::Reasoning(_, r) => {
-                    reasoning.push_str(&r);
+                    full_reasoning.push_str(&r);
                     engine.emitter.emit(Event::ReasoningDelta {
                         seq: engine.next_seq(),
-                        session_id: session_id.clone(),
+                        session_id: session_id.to_string(),
                         message_id,
-                        snapshot: reasoning.clone(),
+                        snapshot: full_reasoning.clone(),
                     });
                 }
-                ClientEvent::Tools(_) => {} // accumulator is unit/fixture-tested
+                ClientEvent::Tools(deltas) => {
+                    for d in &deltas {
+                        accumulator.push(d);
+                    }
+                }
                 ClientEvent::Usage(u) => usage = Some(u),
             }
         };
     }
 
-    let outcome: Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
+    let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
         tokio::select! {
-            _ = &mut cancel_rx => {
+            _ = &mut *cancel_rx => {
                 cancelled = true;
                 while let Ok(ev) = rx.try_recv() {
                     handle_event!(ev);
@@ -647,23 +928,209 @@ async fn run_turn(task: TurnTask) {
         }
     };
     drop(rx);
+    IterationFlow {
+        outcome,
+        tool_calls: accumulator.finish(),
+        usage,
+        ttft,
+        cancelled,
+    }
+}
+
+const MAX_TOOL_ITERATIONS: u32 = 40;
+const CONTEXT_GUARD_FRACTION: f64 = 0.85;
+
+/// bytes/token estimate guiding the hard context guard until usage-based
+/// calibration refines it (deliverable G).
+fn estimate_tokens(msgs: &[Message]) -> u64 {
+    let mut total = 0usize;
+    for m in msgs {
+        total += m.content.as_deref().unwrap_or("").len();
+        for c in &m.tool_calls {
+            total += c.function.arguments.len() + c.function.name.len() + 16;
+        }
+        if m.tool_call_id.is_some() {
+            total += 24;
+        }
+    }
+    (total as f64 / 3.5) as u64
+}
+
+/// Extract the primary path argument for permission decisions / cards.
+fn primary_path(args_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    v.get("path").and_then(|p| p.as_str()).map(String::from)
+}
+
+/// One executed call ready to append as a tool result message.
+struct CallResult {
+    call: palmcode_llm::types::ToolCallSpec,
+    content: String,
+}
+
+async fn run_turn(task: TurnTask) {
+    let TurnTask {
+        session_id,
+        message_id,
+        client,
+        cfg,
+        mut api_messages,
+        store_ptr,
+        mut cancel_rx,
+        tools,
+    } = task;
+    let engine: &Engine = unsafe { &*store_ptr };
+
+    let schemas = tools.as_ref().map(|_| palmcode_tools::schemas());
+    let mut full_text = String::new();
+    let mut full_reasoning = String::new();
+    let mut iterations = 0u32;
+    let mut first_ttft: Option<Duration> = None;
+    let mut total_prompt: Option<u64> = None;
+    let mut total_completion: u64 = 0;
+    let mut total_cached: Option<u64> = None;
+    let mut saw_usage = false;
+
+    let turn_start = Instant::now();
+    let mut cancelled = false;
+
+    let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
+        iterations += 1;
+        if iterations > MAX_TOOL_ITERATIONS {
+            break Err(LlmError::BadJson(format!(
+                "tool loop exceeded {MAX_TOOL_ITERATIONS} iterations (runaway guard)"
+            )));
+        }
+        if cancel_rx.is_terminated() {
+            cancelled = true;
+            break Err(LlmError::Cancelled);
+        }
+        // hard guard: (roughly) full context -> stop before the model does
+        if estimate_tokens(&api_messages) as f64
+            >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
+        {
+            break Err(LlmError::BadJson(format!(
+                "context guard: estimated usage reached {:.0}% of {} tokens - \
+                 start a new session",
+                CONTEXT_GUARD_FRACTION * 100.0,
+                cfg.context_window
+            )));
+        }
+
+        let max_tokens = engine
+            .turn_overrides
+            .lock()
+            .unwrap()
+            .max_output_tokens
+            .unwrap_or(cfg.max_output_tokens);
+        let request = ChatRequest {
+            model: cfg.main_model.clone(),
+            messages: api_messages.clone(),
+            max_tokens,
+            continuous_usage: cfg.continuous_usage,
+            sampling: cfg.sampling.clone(),
+            extra_body: cfg.extra_body.clone(),
+            tools: schemas.clone(),
+        };
+
+        let flow = stream_once(
+            engine,
+            &session_id,
+            message_id,
+            &client,
+            &request,
+            &mut Merge {
+                text: &mut full_text,
+                reasoning: &mut full_reasoning,
+                cancel_rx: &mut cancel_rx,
+            },
+        )
+        .await;
+
+        if first_ttft.is_none() {
+            first_ttft = flow.ttft;
+        }
+        if let Some(u) = flow.usage {
+            saw_usage = true;
+            total_completion += u.completion_tokens as u64;
+            total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
+            if let Some(c) = u.cached_tokens {
+                total_cached = Some(total_cached.unwrap_or(0) + c as u64);
+            }
+        }
+        cancelled |= flow.cancelled;
+
+        let out = match flow.outcome {
+            Ok(o) => o,
+            Err(e) => break Err(e),
+        };
+
+        let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
+        match (wants_tools, &tools) {
+            (true, Some(ctx)) => {
+                if !full_text.ends_with('\n') && !full_text.is_empty() {
+                    full_text.push('\n');
+                }
+                if !full_reasoning.is_empty() {
+                    let _ = engine.store.put_part(
+                        &session_id,
+                        message_id,
+                        "reasoning",
+                        &full_reasoning,
+                    );
+                }
+                if !full_text.is_empty() {
+                    let _ = engine
+                        .store
+                        .put_part(&session_id, message_id, "text", &full_text);
+                }
+                // wire view: assistant with tool calls, then results in order
+                api_messages.push(Message::assistant_tool_calls(flow.tool_calls.clone(), None));
+                if cancel_rx.is_terminated() {
+                    cancelled = true;
+                    break Err(LlmError::Cancelled);
+                }
+                let results =
+                    execute_calls(engine, ctx, &session_id, message_id, flow.tool_calls).await;
+                for r in results {
+                    api_messages.push(Message::tool(r.call.id, r.content));
+                }
+                // loop for the next model turn
+                continue;
+            }
+            (true, None) => {
+                // model emitted tool calls with no workspace/tools on
+                let note = "requested tool calls but no workspace is connected; \
+                            answering without tools";
+                full_text.push_str(&format!("\n\n_{note}_\n"));
+                engine.emitter.emit(Event::TextDelta {
+                    seq: engine.next_seq(),
+                    session_id: session_id.clone(),
+                    message_id,
+                    snapshot: full_text.clone(),
+                });
+                break Ok(out);
+            }
+            (false, _) => break Ok(out),
+        }
+    };
 
     // final persistence — after EVERY closed part
-    if !reasoning.is_empty() && !reasoning_closed {
+    if !full_reasoning.is_empty() {
         let _ = engine
             .store
-            .put_part(&session_id, message_id, "reasoning", &reasoning);
+            .put_part(&session_id, message_id, "reasoning", &full_reasoning);
     }
     match outcome {
         Ok(out) => {
-            if !text.is_empty() {
+            if !full_text.is_empty() {
                 let _ = engine
                     .store
-                    .put_part(&session_id, message_id, "text", &text);
+                    .put_part(&session_id, message_id, "text", &full_text);
             }
-            let completion = out.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
-            let decode_tps = ttft.map(|t| {
-                let d = out.elapsed.saturating_sub(t).as_secs_f64();
+            let completion = u32::try_from(total_completion).unwrap_or(u32::MAX);
+            let decode_tps = first_ttft.map(|t| {
+                let d = turn_start.elapsed().saturating_sub(t).as_secs_f64();
                 if d > 0.0 { completion as f64 / d } else { 0.0 }
             });
             let _ = engine
@@ -674,19 +1141,23 @@ async fn run_turn(task: TurnTask) {
                 session_id: session_id.clone(),
                 message_id,
                 finish_reason: out.finish_reason,
-                ttft_ms: ttft.map(|d| d.as_millis() as u64),
+                ttft_ms: first_ttft.map(|d| d.as_millis() as u64),
                 decode_tps,
-                prompt_tokens: out.usage.as_ref().map(|u| u.prompt_tokens),
-                completion_tokens: out.usage.as_ref().map(|u| u.completion_tokens),
-                cached_tokens: out.usage.and_then(|u| u.cached_tokens),
+                prompt_tokens: if saw_usage {
+                    total_prompt.map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                } else {
+                    None
+                },
+                completion_tokens: if saw_usage { Some(completion) } else { None },
+                cached_tokens: total_cached.map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
             });
         }
         Err(e) => {
             let is_cancel = matches!(e, LlmError::Cancelled) || cancelled;
-            if !text.is_empty() {
+            if !full_text.is_empty() {
                 let _ = engine
                     .store
-                    .put_part(&session_id, message_id, "text", &text);
+                    .put_part(&session_id, message_id, "text", &full_text);
             }
             if !is_cancel {
                 let _ = engine.store.put_part(
@@ -717,10 +1188,336 @@ async fn run_turn(task: TurnTask) {
         }
     }
     let _ = engine.store.set_status(&session_id, "idle");
-    let _ = usage.is_some();
-    let _ = turn_start;
     // the pinned chat future drops at scope end, closing the connection
     engine.inflight.lock().await.remove(&session_id);
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution (permissioned, persisted, preimage-captured)
+// ---------------------------------------------------------------------------
+
+/// Execute a batch of assistant tool calls. Decisions (perms/approvals,
+/// persistence rows, events) stay serial on the orchestrator; an
+/// all-read-only batch runs its executions concurrently; any write degrades
+/// the batch to serial (read-cache + write ordering).
+async fn execute_calls(
+    engine: &Engine,
+    ctx: &Arc<ToolsCtx>,
+    session_id: &str,
+    message_id: i64,
+    calls: Vec<palmcode_llm::types::ToolCallSpec>,
+) -> Vec<CallResult> {
+    struct Approved {
+        spec: palmcode_llm::types::ToolCallSpec,
+        rel: String,
+    }
+    enum Decided {
+        Run(Approved),
+        Skip(String), // deny text -> error result, no execution
+    }
+
+    let mut decided: Vec<Decided> = Vec::with_capacity(calls.len());
+    for c in &calls {
+        let rel = primary_path(&c.arguments).unwrap_or_default();
+        let d = check_permission(engine, ctx, session_id, message_id, c, &rel).await;
+        decided.push(match d {
+            Ok(()) => Decided::Run(Approved {
+                spec: c.clone(),
+                rel,
+            }),
+            Err(deny) => Decided::Skip(deny),
+        });
+    }
+
+    let any_write = decided.iter().any(|d| {
+        matches!(d, Decided::Run(a) if palmcode_perms::TOOLS_WRITE.contains(&a.spec.name.as_str()))
+    });
+
+    // Persistence: every call gets a row (pending) before any execution, so a
+    // crash mid-batch marks everything unfinished (never silently re-run).
+    for c in &calls {
+        let _ =
+            engine
+                .store
+                .tool_call_started(session_id, message_id, &c.id, &c.name, &c.arguments);
+    }
+
+    // Execution: (text, is_error, duration_ms, spill_path)
+    /// (text, is_error, duration_ms, spill_path)
+    type Payload = (String, bool, u64, Option<String>);
+    let mut outcomes: Vec<Option<Payload>> = (0..calls.len()).map(|_| None).collect();
+
+    if !any_write {
+        // concurrent in-process reads; preimage capture unnecessary
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, d) in decided.into_iter().enumerate() {
+            match d {
+                Decided::Skip(deny) => {
+                    outcomes[idx] = Some((format!("error: {deny}"), true, 0, None))
+                }
+                Decided::Run(a) => {
+                    let ctx = ctx.clone();
+                    set.spawn_blocking(move || (idx, exec_one_owned(a.spec, ctx)));
+                }
+            }
+        }
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((idx, payload)) => outcomes[idx] = Some(payload),
+                Err(e) => {
+                    tracing::warn!("read tool task failed: {e}");
+                }
+            }
+        }
+    } else {
+        // serial; preimages right before each write runs
+        for (idx, d) in decided.into_iter().enumerate() {
+            match d {
+                Decided::Skip(deny) => {
+                    outcomes[idx] = Some((format!("error: {deny}"), true, 0, None))
+                }
+                Decided::Run(a) => {
+                    if palmcode_perms::TOOLS_WRITE.contains(&a.spec.name.as_str()) {
+                        capture_preimages(engine, ctx, &a.spec, &a.rel);
+                    }
+                    let ctx2 = ctx.clone();
+                    let spec = a.spec.clone();
+                    let payload = tokio::task::spawn_blocking(move || exec_one_owned(spec, ctx2))
+                        .await
+                        .unwrap_or_else(|e| {
+                            (format!("error: tool task failed: {e}"), true, 0, None)
+                        });
+                    outcomes[idx] = Some(payload);
+                }
+            }
+        }
+    }
+
+    // Finished rows + events, strictly in call order.
+    let mut results = Vec::with_capacity(calls.len());
+    for (c, out) in calls.iter().zip(outcomes) {
+        let (text, is_error, dur, spill) =
+            out.unwrap_or_else(|| ("error: internal tool failure".into(), true, 0, None));
+        let _ = engine.store.tool_call_finished(
+            &c.id,
+            !is_error,
+            Some(&text),
+            spill.as_deref(),
+            dur as i64,
+        );
+        engine.emitter.emit_now(Event::ToolFinished {
+            seq: engine.next_seq(),
+            session_id: session_id.to_string(),
+            message_id,
+            call_id: c.id.clone(),
+            ok: !is_error,
+            duration_ms: dur,
+            preview: preview(&text),
+        });
+        results.push(CallResult {
+            call: c.clone(),
+            content: text,
+        });
+    }
+    results
+}
+
+/// spawn_blocking-owning variant of the tool dispatch (avoids lifetime soup).
+fn exec_one_owned(
+    spec: palmcode_llm::types::ToolCallSpec,
+    ctx: Arc<ToolsCtx>,
+) -> (String, bool, u64, Option<String>) {
+    let t = Instant::now();
+    let tctx = palmcode_tools::Ctx {
+        roots: &ctx.roots,
+        reads: &ctx.reads,
+        spill: &ctx.spill,
+    };
+    let out = palmcode_tools::run_tool(&spec.name, &spec.arguments, &tctx);
+    let dur = t.elapsed().as_millis() as u64;
+    match out {
+        Ok(capped) => (
+            capped.text,
+            false,
+            dur,
+            capped.spilled_to.map(|p| p.display().to_string()),
+        ),
+        Err(e) => (format!("error: {e}"), true, dur, None),
+    }
+}
+
+fn preview(text: &str) -> String {
+    let mut s: String = text.chars().take(160).collect();
+    if text.chars().count() > 160 {
+        s.push('…');
+    }
+    s
+}
+
+/// Ask/deny/resolution for one call. Emits ToolStarted on Allow (execution
+/// follows), and the approval events when interactive.
+async fn check_permission(
+    engine: &Engine,
+    ctx: &Arc<ToolsCtx>,
+    session_id: &str,
+    message_id: i64,
+    spec: &palmcode_llm::types::ToolCallSpec,
+    rel: &str,
+) -> std::result::Result<(), String> {
+    let (rel_for_match, abs) = if rel.is_empty() {
+        ("<no-path>".to_string(), ctx.workspace_root.clone())
+    } else {
+        match ctx.roots.resolve(rel, None) {
+            Ok(abs) => {
+                let r = abs
+                    .strip_prefix(&ctx.workspace_root)
+                    .map(|p| p.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|_| rel.to_string());
+                (r, abs)
+            }
+            Err(_) => (rel.to_string(), ctx.workspace_root.join(rel)),
+        }
+    };
+    let decision = ctx.perms.decide(&spec.name, &rel_for_match, &abs);
+    match decision {
+        palmcode_perms::Decision::Allow => {
+            engine.emitter.emit_now(Event::ToolStarted {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                message_id,
+                call_id: spec.id.clone(),
+                name: spec.name.clone(),
+                path: if rel.is_empty() {
+                    None
+                } else {
+                    Some(rel.to_string())
+                },
+            });
+            Ok(())
+        }
+        palmcode_perms::Decision::Deny => {
+            engine.emitter.emit_now(Event::ToolStarted {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                message_id,
+                call_id: spec.id.clone(),
+                name: spec.name.clone(),
+                path: if rel.is_empty() {
+                    None
+                } else {
+                    Some(rel.to_string())
+                },
+            });
+            Err(format!("denied by permission rules ({rel_for_match})"))
+        }
+        palmcode_perms::Decision::Ask => {
+            // accept-edits flag short-circuits (checked inside decide too for
+            // the write tools; here for anything else)
+            let request_id = engine.approval_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let (tx, rx) = oneshot::channel::<(bool, ApprovalScope)>();
+            engine.approvals.lock().unwrap().insert(request_id, tx);
+            engine.emitter.emit_now(Event::ApprovalRequested {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                message_id,
+                request_id,
+                tool: spec.name.clone(),
+                path: if rel.is_empty() {
+                    rel_for_match.clone()
+                } else {
+                    rel.to_string()
+                },
+                detail: spec.arguments.chars().take(300).collect(),
+            });
+            let (approved, scope) = rx.await.unwrap_or((false, ApprovalScope::Once));
+            engine.emitter.emit_now(Event::ApprovalResolved {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                request_id,
+                approved,
+            });
+            if !approved {
+                return Err("denied by the user".into());
+            }
+            match scope {
+                ApprovalScope::Once => {}
+                ApprovalScope::Session => {
+                    let _ = ctx.perms.allow_for_session(&spec.name, &rel_for_match);
+                }
+                ApprovalScope::Project => {
+                    let _ = ctx.perms.allow_for_session(&spec.name, &rel_for_match);
+                    let _ = palmcode_perms::Engine::persist_project_allow(
+                        &ctx.workspace_root,
+                        palmcode_perms::RuleCfg {
+                            tool: spec.name.clone(),
+                            path: rel_for_match.clone(),
+                            decision: palmcode_perms::DecisionKind::Allow,
+                        },
+                    );
+                }
+            }
+            engine.emitter.emit_now(Event::ToolStarted {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                message_id,
+                call_id: spec.id.clone(),
+                name: spec.name.clone(),
+                path: if rel.is_empty() {
+                    None
+                } else {
+                    Some(rel.to_string())
+                },
+            });
+            Ok(())
+        }
+    }
+}
+
+/// Capture pre-tool images so the UI can show a diff (deliverable F).
+/// Files >512KiB are spilled; apply_patch's whole file list is imaged.
+fn capture_preimages(
+    engine: &Engine,
+    ctx: &Arc<ToolsCtx>,
+    spec: &palmcode_llm::types::ToolCallSpec,
+    rel: &str,
+) {
+    const INLINE_CAP: u64 = 512 * 1024;
+    let mut targets: Vec<String> = Vec::new();
+    if spec.name == "apply_patch" {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&spec.arguments)
+            && let Some(p) = v.get("patch").and_then(|p| p.as_str())
+        {
+            targets = palmcode_tools::patch::mentioned_files(p);
+        }
+    } else if !rel.is_empty() {
+        targets.push(rel.to_string());
+    }
+    for rel in targets {
+        let Ok(abs) = ctx.roots.resolve(&rel, None) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            continue; // new file: nothing to image
+        };
+        if meta.len() > INLINE_CAP {
+            if let Ok(bytes) = std::fs::read(&abs)
+                && let Ok(spilled) = ctx.spill.spill_file(&String::from_utf8_lossy(&bytes))
+            {
+                let _ = engine.store.save_preimage(
+                    &spec.id,
+                    &rel,
+                    None,
+                    Some(&spilled.display().to_string()),
+                );
+                continue;
+            }
+            let _ = engine.store.save_preimage(&spec.id, &rel, None, None);
+        } else if let Ok(content) = std::fs::read_to_string(&abs) {
+            let _ = engine
+                .store
+                .save_preimage(&spec.id, &rel, Some(&content), None);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

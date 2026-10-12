@@ -1102,7 +1102,10 @@ name = "palmcode-agent"
 version = "0.1.0"
 dependencies = [
  "palmcode-llm",
+ "palmcode-perms",
  "palmcode-store",
+ "palmcode-tools",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
