@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: src/main.rs
+@@
+-    let v = compute(1);
++    let v = compute(2);
+*** End Patch

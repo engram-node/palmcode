@@ -11,6 +11,7 @@ pub mod glob;
 pub mod grep;
 pub mod guards;
 pub mod list;
+pub mod patch;
 pub mod paths;
 pub mod read;
 
@@ -36,6 +37,7 @@ pub fn schemas() -> Vec<serde_json::Value> {
         grep::schema(),
         edit::write_schema(),
         edit::edit_schema(),
+        patch::schema(),
     ]
 }
 
@@ -73,6 +75,12 @@ pub fn run_tool(name: &str, args_json: &str, ctx: &Ctx) -> Result<Capped> {
                 .map_err(|e| ToolError::Guard(format!("invalid edit args: {e}")))?;
             let out = edit::run_edit(&args, ctx.roots, ctx.reads)?;
             ctx.spill.apply(out.summary, caps::SEARCH)
+        }
+        "apply_patch" => {
+            let args: patch::Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError::Guard(format!("invalid apply_patch args: {e}")))?;
+            let summary = patch::run(&args, ctx.roots, ctx.reads)?;
+            ctx.spill.apply(summary, caps::SEARCH)
         }
         other => Err(ToolError::Guard(format!("unknown tool: {other}"))),
     }

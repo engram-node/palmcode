@@ -343,6 +343,58 @@ pub struct EditOutcome {
     pub replacements: usize,
 }
 
+/// Shared splicer: apply `old -> new` to in-memory text, with the tier
+/// ladder, uniqueness rule, and colon-free error text (the caller prefixes
+/// the file path). Returns (new_text, tier, replacements).
+pub(crate) fn replace_in_text(
+    text: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> std::result::Result<(String, Tier, usize), String> {
+    let (tier, hits) = find(text, old);
+    let tier = match tier {
+        Some(t) if !hits.is_empty() => t,
+        _ => {
+            let hint = match closest(text, old) {
+                Some((a, b)) => {
+                    let lines: Vec<&str> = text.lines().collect();
+                    let snippet: String = lines[a - 1..b.min(lines.len())]
+                        .iter()
+                        .take(8)
+                        .map(|l| format!("  {l}\n"))
+                        .collect();
+                    format!("; closest match at lines {a}-{b}:\n{snippet}")
+                }
+                None => String::new(),
+            };
+            return Err(format!("oldString not found{hint}"));
+        }
+    };
+    if hits.len() > 1 && !replace_all {
+        let lines: Vec<String> = hits.iter().map(|h| h.start_line.to_string()).collect();
+        return Err(format!(
+            "found {} matches at lines {}; add context to make oldString unique, \
+             or set replaceAll=true",
+            hits.len(),
+            lines.join(", ")
+        ));
+    }
+    let mut hits = hits;
+    if !replace_all {
+        hits.truncate(1);
+    }
+    let replacements = hits.len();
+    let first_line = hits.last().map(|h| h.start_line).unwrap_or(0);
+    let mut out = text.to_string();
+    // right-to-left so byte offsets stay valid
+    for h in hits.iter().rev() {
+        out.replace_range(h.start_byte..h.end_byte, new);
+    }
+    let _ = first_line;
+    Ok((out, tier, replacements))
+}
+
 pub fn run_edit(args: &EditArgs, roots: &RootSet, reads: &ReadCache) -> Result<EditOutcome> {
     if args.old_string.is_empty() {
         return Err(ToolError::Match("oldString must be non-empty".into()));
@@ -356,59 +408,23 @@ pub fn run_edit(args: &EditArgs, roots: &RootSet, reads: &ReadCache) -> Result<E
     reads.check_writable(&path)?;
     let mut ft = load(&path)?;
 
-    let (tier, hits) = find(&ft.text, &args.old_string);
-    let tier = match tier {
-        Some(t) if !hits.is_empty() => t,
-        _ => {
-            let hint = match closest(&ft.text, &args.old_string) {
-                Some((a, b)) => {
-                    let lines: Vec<&str> = ft.text.lines().collect();
-                    let snippet: String = lines[a - 1..b.min(lines.len())]
-                        .iter()
-                        .take(8)
-                        .map(|l| format!("  {l}\n"))
-                        .collect();
-                    format!("; closest match at lines {a}-{b}:\n{snippet}")
-                }
-                None => String::new(),
-            };
-            return Err(ToolError::Match(format!(
-                "oldString not found in {}{hint}",
-                path.display()
-            )));
-        }
-    };
-
-    let replacements = if args.replace_all { hits.len() } else { 1 };
-    if hits.len() > 1 && !args.replace_all {
-        let lines: Vec<String> = hits.iter().map(|h| h.start_line.to_string()).collect();
-        return Err(ToolError::Match(format!(
-            "found {} matches at lines {}; add context to make oldString unique, \
-             or set replaceAll=true",
-            hits.len(),
-            lines.join(", ")
-        )));
-    }
-
-    // Apply right-to-left so byte offsets stay valid.
-    let mut hits = hits;
-    if !args.replace_all {
-        hits.truncate(1);
-    }
-    for h in hits.iter().rev() {
-        ft.text
-            .replace_range(h.start_byte..h.end_byte, &args.new_string);
-    }
+    let (new_text, tier, replacements) = replace_in_text(
+        &ft.text,
+        &args.old_string,
+        &args.new_string,
+        args.replace_all,
+    )
+    .map_err(|m| ToolError::Match(format!("{}: {m}", path.display())))?;
+    ft.text = new_text;
     let bytes = encode(&ft);
     atomic_write(&path, &bytes)?;
     reads.record_read(&path)?;
     Ok(EditOutcome {
         summary: format!(
-            "edited {}: {} replacement(s) [{}] at line {}",
+            "edited {}: {} replacement(s) [{}]",
             path.display(),
             replacements,
-            tier_name(tier),
-            hits.last().map(|h| h.start_line).unwrap_or(0)
+            tier_name(tier)
         ),
         tier_used: tier,
         replacements,
