@@ -55,6 +55,23 @@ Known cosmetic issue found and fixed during this run: root composables lacked
 same commit. Driving notes (screen sleep, `&#183;` entities) are in
 docs/NOTES.md.
 
+## M2 pre-work: R8/minified release runtime - motorola edge 50 neo, 2026-10-12
+
+Release APK (5.14 MB, R8 + shrinkResources) debug-signed and installed over
+the debug build (user data + Keystore key survived). First signed build
+failed ALL HTTPS: R8 had stripped `org.rustls.platformverifier.**` classes
+that Rust looks up by exact JNI name; fixed with a keep rule - this is the
+only R8 regression found by probing.
+
+| Check | Result |
+|---|---|
+| Cold start x4 (`am start -W`) | **463 / 331 / 316 / 301 ms** |
+| Probe vs Grid (R8 build) | models/tokenize-403->heuristic/tool_choice/reasoning_content/final-chunk usage/cached_tokens all OK; **TTFT 309 ms, 37.8 tok/s** |
+| Streaming turn @100 tok/s via mock+reverse | streamed 60+ s, jank **0.00% (0/7310 frames)** |
+| Stop mid-stream | mock: `client-disconnected observed` |
+| APK arm64 release unsigned | **5.14 MB** (was 25.74 MB unshrunk) - composition in BENCHMARKS.md |
+| CI (PR #6) incl. R8 byte-repro | green, both runs |
+
 ## Verified on physical hardware
 
 Verified via the probe above (identical app, post-rename `dev.palmcode`).
