@@ -535,6 +535,74 @@ pub fn workspace_clear() {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    pub created_at: i64,
+    pub last_used_at: i64,
+}
+
+#[derive(uniffi::Record)]
+pub struct WorkspaceMetricsRecord {
+    pub present: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+}
+
+fn to_record(w: palmcode_store::StoredWorkspace) -> WorkspaceRecord {
+    WorkspaceRecord {
+        id: w.id,
+        name: w.name,
+        root_path: w.root_path,
+        created_at: w.created_at,
+        last_used_at: w.last_used_at,
+    }
+}
+
+/// App-private dir the SAF import copies trees into.
+#[uniffi::export]
+pub fn workspace_import_dir() -> Result<String, FfiError> {
+    Ok(engine()?.workspace_import_dir().display().to_string())
+}
+
+#[uniffi::export]
+pub fn workspace_register(name: String, root_path: String) -> Result<WorkspaceRecord, FfiError> {
+    engine()?
+        .workspace_register(&name, &root_path)
+        .map(to_record)
+        .map_err(map_err)
+}
+
+#[uniffi::export]
+pub fn workspaces_list() -> Result<Vec<WorkspaceRecord>, FfiError> {
+    Ok(engine()?
+        .workspaces_list()
+        .map_err(map_err)?
+        .into_iter()
+        .map(to_record)
+        .collect())
+}
+
+/// delete_files is honored only for roots under the app-private import dir.
+#[uniffi::export]
+pub fn workspace_remove(id: String, delete_files: bool) -> Result<(), FfiError> {
+    engine()?
+        .workspace_remove(&id, delete_files)
+        .map_err(map_err)
+}
+
+#[uniffi::export]
+pub fn workspace_metrics(root_path: String) -> Result<WorkspaceMetricsRecord, FfiError> {
+    let m = engine()?.workspace_metrics(&root_path).map_err(map_err)?;
+    Ok(WorkspaceMetricsRecord {
+        present: m.present,
+        size_bytes: m.size_bytes,
+        file_count: m.file_count,
+    })
+}
+
 /// Answer a pending approval sheet. scope: "once" | "session" | "project".
 #[uniffi::export]
 pub fn approval_resolve(request_id: u64, approved: bool, scope: String) {

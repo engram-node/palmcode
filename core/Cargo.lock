@@ -1101,6 +1101,7 @@ dependencies = [
 name = "palmcode-agent"
 version = "0.1.0"
 dependencies = [
+ "ignore",
  "palmcode-llm",
  "palmcode-perms",
  "palmcode-store",
@@ -1139,6 +1140,7 @@ dependencies = [
  "jni",
  "palmcode-agent",
  "palmcode-llm",
+ "palmcode-store",
  "rustls-platform-verifier",
  "thiserror 2.0.21",
  "uniffi",

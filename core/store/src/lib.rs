@@ -70,6 +70,15 @@ pub struct StoredToolCall {
     pub spill_path: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoredWorkspace {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    pub created_at: i64,
+    pub last_used_at: i64,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -136,6 +145,14 @@ CREATE TABLE IF NOT EXISTS file_preimages(
     spill_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_preimages_call ON file_preimages(call_id);
+-- M2 (E): registered workspaces (SAF-imported copies or dev paths).
+CREATE TABLE IF NOT EXISTS workspaces(
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+);
 ";
 
 fn now_ms() -> i64 {
@@ -328,6 +345,84 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    // --- workspaces (M2 E) --------------------------------------------------
+
+    /// Register (or rename) a workspace root. Id is stable per root.
+    pub fn workspace_upsert(
+        &self,
+        name: &str,
+        root_path: &str,
+    ) -> Result<StoredWorkspace, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let id = format!(
+            "w{:x}{:04x}",
+            now_ms(),
+            std::process::id() as u32 ^ (now_ms() as u32 & 0xffff)
+        );
+        conn.execute(
+            "INSERT INTO workspaces(id, name, root_path, created_at, last_used_at) \
+             VALUES (?1,?2,?3,?4,?4) \
+             ON CONFLICT(root_path) DO UPDATE SET name=excluded.name, last_used_at=excluded.last_used_at",
+            params![id, name, root_path, now_ms()],
+        )?;
+        conn.query_row(
+            "SELECT id, name, root_path, created_at, last_used_at FROM workspaces WHERE root_path=?1",
+            params![root_path],
+            |r| {
+                Ok(StoredWorkspace {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    root_path: r.get(2)?,
+                    created_at: r.get(3)?,
+                    last_used_at: r.get(4)?,
+                })
+            },
+        )
+        .map_err(StoreError::from)
+    }
+
+    pub fn workspaces_list(&self) -> Result<Vec<StoredWorkspace>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare(
+            "SELECT id, name, root_path, created_at, last_used_at FROM workspaces ORDER BY last_used_at DESC",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(StoredWorkspace {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    root_path: r.get(2)?,
+                    created_at: r.get(3)?,
+                    last_used_at: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Bump last_used for a root (set_workspace). Missing row is not an error.
+    pub fn workspace_touch_by_root(&self, root_path: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE workspaces SET last_used_at=?1 WHERE root_path=?2",
+            params![now_ms(), root_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn workspace_remove(&self, id: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let root: Option<String> = conn
+            .query_row(
+                "SELECT root_path FROM workspaces WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok();
+        conn.execute("DELETE FROM workspaces WHERE id=?1", params![id])?;
+        Ok(root)
     }
 
     pub fn set_status(&self, session: &str, status: &str) -> Result<(), StoreError> {

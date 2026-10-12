@@ -278,6 +278,8 @@ pub struct Engine {
     emitter: Emitter,
     /// single workspace root for now; M2-E swaps this for the workspaces table
     workspace: Mutex<Option<PathBuf>>,
+    /// db's directory (spill + workspaces subdirs hang off it)
+    db_dir: PathBuf,
     /// app-private spill base (db's directory), per-session subdirs
     spill_base: PathBuf,
     tools: Mutex<HashMap<String, Arc<ToolsCtx>>>,
@@ -294,6 +296,14 @@ pub struct TurnOverrides {
     pub max_output_tokens: Option<u32>,
 }
 
+/// Size/count of a workspace root (deliverable E list screens).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkspaceMetrics {
+    pub present: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+}
+
 impl Engine {
     pub fn start(db_path: &Path, sink: Arc<dyn EventSink>) -> Result<Self, EngineError> {
         let store = Store::open(db_path)?;
@@ -305,10 +315,11 @@ impl Engine {
             .build()
             .expect("tokio runtime");
         let emitter = Emitter::start(rt.handle().clone(), sink.clone());
-        let spill_base = db_path
+        let db_dir = db_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .join("spill");
+            .to_path_buf();
+        let spill_base = db_dir.join("spill");
         let engine = Self {
             rt,
             store,
@@ -320,6 +331,7 @@ impl Engine {
             inflight: AsyncMutex::new(HashMap::new()),
             emitter,
             workspace: Mutex::new(None),
+            db_dir,
             spill_base,
             tools: Mutex::new(HashMap::new()),
             approvals: Arc::new(Mutex::new(HashMap::new())),
@@ -352,6 +364,7 @@ impl Engine {
         palmcode_perms::Engine::load(&p, None).map_err(EngineError::Tools)?;
         self.tools.lock().unwrap().clear(); // roots/perms changed: redo ctxs
         *self.workspace.lock().unwrap() = Some(p);
+        let _ = self.store.workspace_touch_by_root(root);
         tracing::info!(workspace = root, "tools enabled (workspace set)");
         Ok(())
     }
@@ -367,6 +380,91 @@ impl Engine {
     pub fn clear_workspace(&self) {
         *self.workspace.lock().unwrap() = None;
         self.tools.lock().unwrap().clear();
+    }
+
+    // ---------- M2 E: workspace registry ----------
+
+    /// App-private dir SAF imports copy into: `<db_dir>/workspaces`.
+    pub fn workspace_import_dir(&self) -> PathBuf {
+        self.db_dir.join("workspaces")
+    }
+
+    /// Register a workspace root (SAF-imported copy or dev path).
+    pub fn workspace_register(
+        &self,
+        name: &str,
+        root: &str,
+    ) -> Result<palmcode_store::StoredWorkspace, EngineError> {
+        let p = PathBuf::from(root);
+        palmcode_tools::RootSet::new(vec![p]).map_err(|e| EngineError::Tools(e.to_string()))?;
+        Ok(self.store.workspace_upsert(name, root)?)
+    }
+
+    pub fn workspaces_list(&self) -> Result<Vec<palmcode_store::StoredWorkspace>, EngineError> {
+        Ok(self.store.workspaces_list()?)
+    }
+
+    /// Remove the registry row; files are deleted only under the app-private
+    /// import dir (never a user's own folder, even if asked).
+    pub fn workspace_remove(&self, id: &str, delete_files: bool) -> Result<(), EngineError> {
+        let Some(root) = self.store.workspace_remove(id)? else {
+            return Ok(());
+        };
+        if delete_files {
+            let rootp = PathBuf::from(&root);
+            let import_dir = self.workspace_import_dir();
+            let in_private = rootp
+                .canonicalize()
+                .ok()
+                .zip(import_dir.canonicalize().ok())
+                .map(|(r, d)| r.starts_with(d))
+                .unwrap_or(false);
+            if in_private {
+                let _ = std::fs::remove_dir_all(&rootp);
+            } else {
+                tracing::warn!(root, "refusing to delete files outside the import dir");
+            }
+        }
+        // never leave the live ctx pointing at a removed root
+        if self.workspace().as_deref() == Some(root.as_str()) {
+            self.clear_workspace();
+        }
+        Ok(())
+    }
+
+    /// Total size + file count of a root (gitignore-aware walk; counts are
+    /// capped so a pathological tree cannot run for minutes).
+    pub fn workspace_metrics(&self, root: &str) -> Result<WorkspaceMetrics, EngineError> {
+        const MAX_FILES: u64 = 1_000_000;
+        let rootp = PathBuf::from(root);
+        if !rootp.is_dir() {
+            return Ok(WorkspaceMetrics {
+                present: false,
+                size_bytes: 0,
+                file_count: 0,
+            });
+        }
+        let mut size = 0u64;
+        let mut count = 0u64;
+        for entry in ignore::WalkBuilder::new(&rootp)
+            .require_git(false) // SAF imports: .gitignore without .git
+            .hidden(false)
+            .build()
+        {
+            let Ok(e) = entry else { continue };
+            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                count += 1;
+                if count > MAX_FILES {
+                    break;
+                }
+                size += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        Ok(WorkspaceMetrics {
+            present: true,
+            size_bytes: size,
+            file_count: count,
+        })
     }
 
     /// Per-session tools context (lazily built; dies with workspace change).

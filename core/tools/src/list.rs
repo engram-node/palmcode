@@ -33,6 +33,8 @@ pub fn run(args: &Args, roots: &RootSet, spill: &Spiller) -> Result<Capped> {
     for entry in WalkBuilder::new(&start)
         .max_depth(Some(depth + 1))
         .standard_filters(true)
+        // SAF-imported trees have no .git dir: honor .gitignore anyway
+        .require_git(false)
         .hidden(false) // show dotfiles like .env — but never VCS internals
         .filter_entry(|e| e.file_name() != ".git")
         .sort_by_file_name(|a, b| a.cmp(b))
