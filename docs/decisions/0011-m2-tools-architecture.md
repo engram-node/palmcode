@@ -23,9 +23,9 @@ bad loops; per-loop context-guard: estimated prompt >= 85% of
 context_window -> TurnError "context nearly full, start a new session"
 (compaction is M4).
 
-**Executor trait (AGENTS.md).** All host I/O through `core/exec::Executor`;
-tools never touch `std::process`. `HostExecutor` (host-cli bench) and
-`AndroidExecutor` remain the two impls; M2 tools use only filesystem APIs.
+**Executor trait (AGENTS.md).** M2 tools are pure `std::fs` — no processes,
+no network — so the `core/exec` Executor trait stays a placeholder until
+M3 (bash/userland/webfetch). Adding it now would be dead code.
 
 **Path safety (C).** One module `tools::paths`: canonicalize + symlink
 resolution, reject `..` after normalization, root-escape rejection,
