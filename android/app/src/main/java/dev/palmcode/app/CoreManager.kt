@@ -13,20 +13,26 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import dev.palmcode.core.CoreEvent
 import dev.palmcode.core.CoreEventListener
 import dev.palmcode.core.SessionInfo
+import dev.palmcode.core.approvalResolve
 import dev.palmcode.core.coreShutdown
 import dev.palmcode.core.coreStart
 import dev.palmcode.core.messageSend
 import dev.palmcode.core.providerConfigure
 import dev.palmcode.core.sessionTranscript
 import dev.palmcode.core.sessionsCreate
+import dev.palmcode.core.sessionSetAcceptEdits
 import dev.palmcode.core.sessionsList
 import dev.palmcode.core.turnResume
 import dev.palmcode.core.turnStop
+import dev.palmcode.core.workspaceClear
+import dev.palmcode.core.workspaceCurrent
+import dev.palmcode.core.workspaceSet
 import java.io.File
 
 sealed interface Screen {
     data object Setup : Screen
     data object Sessions : Screen
+    data object Workspaces : Screen
     data class Chat(val sessionId: String) : Screen
 }
 
@@ -42,12 +48,35 @@ class ChatMsg(val id: Long, val role: String) {
     var decodeTps by mutableStateOf<Double?>(null)
     var completionTokens by mutableStateOf<Long?>(null)
     var cachePct by mutableStateOf<Int?>(null)
+    val tools = mutableStateListOf<ToolCard>()
 }
+
+/** A tool call in flight or done (live events only; not rehydrated). */
+class ToolCard(val id: String, val name: String, val path: String?) {
+    var done by mutableStateOf(false)
+    var ok by mutableStateOf(false)
+    var durationMs by mutableStateOf(0L)
+    var preview by mutableStateOf("")
+}
+
+/** A pending approval sheet (engine blocks the call until resolved). */
+class Approval(
+    val requestId: ULong,
+    val sessionId: String,
+    val messageId: Long,
+    val tool: String,
+    val path: String,
+    val detail: String,
+)
 
 object AppState {
     var screen by mutableStateOf<Screen>(Screen.Setup)
     var providerCleartext by mutableStateOf(false)
     val sessions = mutableStateListOf<SessionInfo>()
+    val approvals = mutableStateListOf<Approval>()
+    /** "Accept edits for this session" toggle state, per session id. */
+    val acceptEdits = mutableStateMapOf<String, Boolean>()
+    var workspace by mutableStateOf<String?>(null)
     private val transcripts = mutableStateMapOf<String, SnapshotStateList<ChatMsg>>()
 
     fun transcript(sessionId: String): SnapshotStateList<ChatMsg> =
@@ -122,6 +151,31 @@ object AppState {
                         }
                     }
                     is CoreEvent.Compacted -> {}
+                    is CoreEvent.ToolStarted -> find(e.sessionId, e.messageId)?.let { m ->
+                        if (m.tools.none { it.id == e.callId }) {
+                            m.tools.add(ToolCard(e.callId, e.name, e.path))
+                        }
+                    }
+                    is CoreEvent.ToolFinished -> find(e.sessionId, e.messageId)?.let { m ->
+                        m.tools.firstOrNull { it.id == e.callId }?.let { c ->
+                            c.done = true
+                            c.ok = e.ok
+                            c.durationMs = e.durationMs.toLong()
+                            c.preview = e.preview
+                        }
+                    }
+                    is CoreEvent.ApprovalRequested -> {
+                        if (approvals.none { it.requestId == e.requestId }) {
+                            approvals.add(
+                                Approval(
+                                    e.requestId, e.sessionId, e.messageId,
+                                    e.tool, e.path, e.detail,
+                                ),
+                            )
+                        }
+                    }
+                    is CoreEvent.ApprovalResolved -> approvals.removeAll { it.requestId == e.requestId }
+                    is CoreEvent.AutoApproveEdits -> e.sessionId?.let { acceptEdits[it] = e.on }
                 }
             }
         }
@@ -153,6 +207,7 @@ object CoreManager {
         check(PalmcodeCore.nativeInitAndroid(context) == 0) { "native TLS init failed" }
         coreStart(File(context.filesDir, "palmcode.db").absolutePath, listener)
         store = ProviderStore(context.applicationContext)
+        AppState.workspace = workspaceCurrent()
         started = true
     }
 
@@ -198,6 +253,29 @@ object CoreManager {
     fun stop(sessionId: String) = turnStop(sessionId)
 
     fun resumeChat(sessionId: String) = turnResume(sessionId)
+
+    // ---- M2: approvals + workspace ----
+
+    /** scope: "once" | "session" | "project" */
+    fun resolveApproval(requestId: ULong, approved: Boolean, scope: String) {
+        approvalResolve(requestId, approved, scope)
+        AppState.approvals.removeAll { it.requestId == requestId }
+    }
+
+    fun setAcceptEdits(sessionId: String, on: Boolean) {
+        sessionSetAcceptEdits(sessionId, on)
+        AppState.acceptEdits[sessionId] = on
+    }
+
+    fun setWorkspace(root: String) {
+        workspaceSet(root)
+        AppState.workspace = root
+    }
+
+    fun clearWorkspace() {
+        workspaceClear()
+        AppState.workspace = null
+    }
 
     // Process exit tears the engine down; no explicit UI-side shutdown.
     @Suppress("unused")

@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import dev.palmcode.app.ui.ChatScreen
 import dev.palmcode.app.ui.SessionListScreen
 import dev.palmcode.app.ui.SetupScreen
+import dev.palmcode.app.ui.WorkspaceScreen
 import dev.palmcode.app.ui.theme.PalmcodeTheme
 
 class MainActivity : ComponentActivity() {
@@ -29,6 +30,7 @@ class MainActivity : ComponentActivity() {
                             AppState.screen = Screen.Sessions
                         })
                         Screen.Sessions -> SessionListScreen()
+                        Screen.Workspaces -> WorkspaceScreen()
                         is Screen.Chat -> ChatScreen(s.sessionId)
                     }
                 }

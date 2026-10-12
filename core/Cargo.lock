@@ -1118,7 +1118,9 @@ dependencies = [
 name = "palmcode-bench"
 version = "0.1.0"
 dependencies = [
+ "palmcode-agent",
  "palmcode-llm",
+ "tempfile",
  "tokio",
 ]
 

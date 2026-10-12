@@ -67,6 +67,7 @@ fun SessionListScreen() {
             Text("palmcode", style = MaterialTheme.typography.headlineMedium)
             Row {
                 LicensesButton()
+                TextButton(onClick = { AppState.screen = Screen.Workspaces }) { Text("Workspaces") }
                 TextButton(onClick = { AppState.screen = Screen.Setup }) { Text("Provider") }
             }
         }
