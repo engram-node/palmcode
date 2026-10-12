@@ -3,6 +3,8 @@
 -keep class dev.palmcode.core.** { *; }
 # Rust calls this handler by exact JNI name.
 -keep class dev.palmcode.app.PalmcodeCore { *; }
+# rustls-platform-verifier looks these up by exact JNI name from Rust.
+-keep class org.rustls.platformverifier.** { *; }
 
 # JNA carries unused desktop entries; never reachable on Android (R8-generated list).
 -dontwarn java.awt.Component
