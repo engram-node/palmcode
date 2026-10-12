@@ -26,20 +26,64 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(1500);
 const SYSTEM_PROMPT: &str = "You are palmcode, a coding assistant running on-device inside an Android app. \
      Be concise and precise. In this build no file/shell tools are available.";
 
-const SYSTEM_PROMPT_TOOLS: &str = "You are palmcode, a coding agent running on-device inside an Android app. \
-You work directly against the user's workspace with the given file tools. \
-Be concise and precise. Prefer editing the smallest possible region. \
-Never invent file contents: read before you write, grep before you edit. \
-Never touch paths outside the workspace; never read secret files (.env, keys) unless they are the task.";
+/// GLM-family build mode (deliverable I): explicit tool flow, in GLM's
+/// preferred imperative style. Keep byte-stable; variables go to the env block.
+const SYSTEM_PROMPT_BUILD_GLM: &str = "You are palmcode, a coding agent running on-device inside an Android app, in BUILD mode.
+
+# Tool flow
+1. Orient first: ls or glob the paths the request mentions; grep for the symbols you change.
+2. read every file before editing it (the harness REFUSES writes to unread files).
+3. Change exactly one concern per call: prefer edit (old_string/new_string) over rewriting whole files. Use apply_patch for multi-file or moved-code changes.
+4. After each edit, if the result contains a `syntax:` warning, fix it with a follow-up edit BEFORE doing anything else.
+5. Batch independent read/glob/grep/ls calls in one assistant turn; never batch writes.
+6. Read tool results are capped; when a result mentions a spill path, grep or read slices from that file instead of repeating the call.
+
+# Limits
+- Paths are relative to the workspace root; absolute paths are refused.
+- Never read or modify secret files (.env, *.pem, keys) unless the task explicitly requires it.
+- Bash/shell/git tools are not available in this build; do not attempt them.
+- If a tool result is an error, adapt and continue; never repeat the identical call.
+
+# Style
+- Be concise: the answer after a change lists what changed, where, and what remains. Do not restate file contents.";
+
+/// Generic template (non-GLM models): same contract, less prescriptive.
+const SYSTEM_PROMPT_BUILD_GENERIC: &str = "You are palmcode, a coding agent running on-device inside an Android app, in BUILD mode.
+
+# Rules
+- Orient before acting: inspect files with ls/glob/grep and read them fully before editing.
+- The harness refuses writes to files you have not read in this session.
+- Prefer edit (smallest region) or apply_patch over full-file rewrites.
+- If a tool result contains a `syntax:` warning or an error, correct it with your next tool call.
+- Independent read-only calls may be batched in one turn; writes are one concern per call.
+- Paths are relative to the workspace root. Never touch secret files (.env, private keys) unless required.
+- No bash/shell/git tools exist in this build.
+
+# Style
+- Be concise and precise. Report what changed and where. Do not restate file contents.";
+
+fn build_prompt(model: &str) -> &'static str {
+    if model.to_ascii_lowercase().contains("glm") {
+        SYSTEM_PROMPT_BUILD_GLM
+    } else {
+        SYSTEM_PROMPT_BUILD_GENERIC
+    }
+}
+
+/// The volatile tail; anything variable goes HERE, never in the prefix.
+fn env_block(workspace: &Path) -> String {
+    format!(
+        "# Environment\nWorkspace root (all tool paths are relative to it): {}",
+        workspace.display()
+    )
+}
 
 /// Byte-stable prefix + trailing environment block (deliverable I): the
-/// workspace path lives at the END so the stable head is cache-friendly.
-fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>) -> String {
+/// volatile workspace path lives at the END so the stable head is the
+/// prefix-cache key.
+fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>, model: &str) -> String {
     match (tools, workspace) {
-        (Some(_), Some(ws)) => format!(
-            "{SYSTEM_PROMPT_TOOLS}\n\n# Environment\nWorkspace root (all tool paths are relative to it): {}",
-            ws.display()
-        ),
+        (Some(_), Some(ws)) => format!("{}\n\n{}", build_prompt(model), env_block(ws)),
         _ => SYSTEM_PROMPT.to_string(),
     }
 }
@@ -636,6 +680,7 @@ impl Engine {
         let mut api_messages = vec![Message::system(system_prompt(
             tools.as_ref(),
             self.workspace.lock().unwrap().as_deref(),
+            &cfg.main_model,
         ))];
         api_messages.extend(self.api_history(session_id)?);
         let count_task: tokio::task::JoinHandle<palmcode_llm::count::TokenCount> = {
@@ -814,6 +859,7 @@ impl Engine {
         let mut api_messages = vec![Message::system(system_prompt(
             tools.as_ref(),
             self.workspace.lock().unwrap().as_deref(),
+            &cfg.main_model,
         ))];
         api_messages.extend(self.api_history(session_id)?);
         let count = palmcode_llm::count::TokenCount {
@@ -1757,5 +1803,44 @@ impl Emitter {
             std::mem::take(&mut inner.pending)
         };
         self.sink.on_batch(pending);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_family_switch() {
+        assert_eq!(build_prompt("glm-4.6"), SYSTEM_PROMPT_BUILD_GLM);
+        assert_eq!(build_prompt("mock-glm"), SYSTEM_PROMPT_BUILD_GLM);
+        assert_eq!(build_prompt("claude-x"), SYSTEM_PROMPT_BUILD_GENERIC);
+    }
+
+    #[test]
+    fn prompt_prefix_byte_stable_env_trails() {
+        let glm = format!(
+            "{}\n\n{}",
+            build_prompt("glm-4.6"),
+            env_block(Path::new("/ws/a"))
+        );
+        let glm2 = format!(
+            "{}\n\n{}",
+            build_prompt("glm-4.6"),
+            env_block(Path::new("/ws/b"))
+        );
+        // volatile part differs only after the stable head
+        let head_len = build_prompt("glm-4.6").len();
+        assert_eq!(&glm.as_bytes()[..head_len], &glm2.as_bytes()[..head_len]);
+        assert!(glm.starts_with(SYSTEM_PROMPT_BUILD_GLM));
+        assert!(glm.ends_with(env_block(Path::new("/ws/a")).as_str()));
+        assert!(glm.contains("# Environment\nWorkspace root"));
+        // both templates teach the syntax-warning repair loop
+        for p in [SYSTEM_PROMPT_BUILD_GLM, SYSTEM_PROMPT_BUILD_GENERIC] {
+            assert!(p.contains("BUILD mode"));
+            assert!(p.contains("syntax:"));
+        }
+        // no workspace -> old chunk-only prompt
+        assert_eq!(system_prompt(None, None, "glm-4.6"), SYSTEM_PROMPT);
     }
 }

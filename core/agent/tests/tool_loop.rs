@@ -185,8 +185,7 @@ fn usage_calibrates_bytes_per_token_ema() {
         text_with_usage("second", 400, 4),
     ]);
     let Rig { c, engine, .. } = &rig;
-    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
-    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    // no workspace: isolates the message-bytes calibration from schema bytes
 
     let sess = engine.create_session("t").unwrap();
     let mid = engine.send(&sess.id, "hello").unwrap();
