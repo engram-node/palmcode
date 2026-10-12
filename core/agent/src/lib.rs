@@ -1038,9 +1038,9 @@ async fn stream_once(
 const MAX_TOOL_ITERATIONS: u32 = 40;
 const CONTEXT_GUARD_FRACTION: f64 = 0.85;
 
-/// bytes/token estimate guiding the hard context guard until usage-based
-/// calibration refines it (deliverable G).
-fn estimate_tokens(msgs: &[Message]) -> u64 {
+/// bytes/token estimate guiding the hard context guard: EMA-smoothed from
+/// usage.prompt_tokens of real turns (deliverable G), 3.5 until calibrated.
+fn estimate_tokens(msgs: &[Message], bytes_per_token: f64) -> u64 {
     let mut total = 0usize;
     for m in msgs {
         total += m.content.as_deref().unwrap_or("").len();
@@ -1051,7 +1051,50 @@ fn estimate_tokens(msgs: &[Message]) -> u64 {
             total += 24;
         }
     }
-    (total as f64 / 3.5) as u64
+    (total as f64 / bytes_per_token) as u64
+}
+
+/// Serialized bytes of the wire payload that usage.prompt_tokens measures
+/// (messages + tool defs; model/params overhead is negligible per request).
+fn wire_bytes(request: &ChatRequest) -> u64 {
+    let msgs = request
+        .messages
+        .iter()
+        .map(|m| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(0))
+        .sum::<usize>();
+    let tools = request
+        .tools
+        .as_ref()
+        .map(|t| t.iter().map(|s| s.to_string().len()).sum::<usize>())
+        .unwrap_or(0);
+    (msgs + tools) as u64
+}
+
+const DEFAULT_BPT: f64 = 3.5;
+const EMA_ALPHA: f64 = 0.35; // ADR 0011
+
+impl Engine {
+    fn ema_bpt(&self, model: &str) -> f64 {
+        self.store
+            .meta_get(&format!("ema_bpt:{model}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| *v > 0.5 && *v < 50.0)
+            .unwrap_or(DEFAULT_BPT)
+    }
+
+    fn note_usage_sample(&self, model: &str, bytes: u64, prompt_tokens: u64) {
+        if prompt_tokens == 0 || bytes == 0 {
+            return;
+        }
+        let sample = bytes as f64 / prompt_tokens as f64;
+        let prev = self.ema_bpt(model);
+        let ema = EMA_ALPHA * sample + (1.0 - EMA_ALPHA) * prev;
+        let _ = self
+            .store
+            .meta_set(&format!("ema_bpt:{model}"), &ema.to_string());
+    }
 }
 
 /// Extract the primary path argument for permission decisions / cards.
@@ -1104,7 +1147,8 @@ async fn run_turn(task: TurnTask) {
             break Err(LlmError::Cancelled);
         }
         // hard guard: (roughly) full context -> stop before the model does
-        if estimate_tokens(&api_messages) as f64
+        let bpt = engine.ema_bpt(&cfg.main_model);
+        if estimate_tokens(&api_messages, bpt) as f64
             >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
         {
             break Err(LlmError::BadJson(format!(
@@ -1155,6 +1199,12 @@ async fn run_turn(task: TurnTask) {
             if let Some(c) = u.cached_tokens {
                 total_cached = Some(total_cached.unwrap_or(0) + c as u64);
             }
+            // G: calibrate the bytes/token EMA from real usage
+            engine.note_usage_sample(
+                &cfg.main_model,
+                wire_bytes(&request),
+                u.prompt_tokens as u64,
+            );
         }
         cancelled |= flow.cancelled;
 

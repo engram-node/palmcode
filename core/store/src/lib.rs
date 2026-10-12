@@ -185,6 +185,25 @@ impl Store {
         })
     }
 
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let v = conn
+            .query_row("SELECT v FROM meta WHERE k=?1", params![key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok();
+        Ok(v)
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn next_event_seq(&self) -> i64 {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))

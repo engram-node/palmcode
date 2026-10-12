@@ -168,6 +168,49 @@ fn read_tool_executes_and_loops_to_answer() {
     assert!(text.contains("minimal Rust program"), "{text}");
 }
 
+/// one content chunk + finish with usage + [DONE]
+fn text_with_usage(text: &str, prompt: u32, completion: u32) -> Vec<u8> {
+    format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n\
+         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{prompt},\"completion_tokens\":{completion}}}}}\n\n\
+         data: [DONE]\n\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn usage_calibrates_bytes_per_token_ema() {
+    let rig = setup(vec![
+        text_with_usage("first", 200, 4),
+        text_with_usage("second", 400, 4),
+    ]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+
+    let sess = engine.create_session("t").unwrap();
+    let mid = engine.send(&sess.id, "hello").unwrap();
+    wait_for(
+        c,
+        |e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "MessageFinished",
+    );
+    engine.shutdown();
+
+    // G: real usage rewrote the default 3.5 bytes/token for this model
+    let store = palmcode_store::Store::open(&rig._dir.path().join("t.db")).unwrap();
+    let ema: f64 = store
+        .meta_get("ema_bpt:mock-glm")
+        .unwrap()
+        .expect("ema persisted")
+        .parse()
+        .unwrap();
+    assert!(
+        (0.5..8.0).contains(&ema) && (ema - 3.5).abs() > 1e-9,
+        "ema moved off the default toward observed bytes/token: {ema}"
+    );
+}
+
 #[test]
 fn write_waits_for_approval_then_errors_on_bad_args() {
     // the renamed fixture carries {"path": "...", no content}: proves
