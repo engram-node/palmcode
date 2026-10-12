@@ -158,6 +158,43 @@ pub enum CoreEvent {
         session_id: String,
         dropped_messages: u64,
     },
+    ToolStarted {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        name: String,
+        path: Option<String>,
+    },
+    ToolFinished {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        ok: bool,
+        duration_ms: u64,
+        preview: String,
+    },
+    ApprovalRequested {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        request_id: u64,
+        tool: String,
+        path: String,
+        detail: String,
+    },
+    ApprovalResolved {
+        seq: u64,
+        session_id: String,
+        request_id: u64,
+        approved: bool,
+    },
+    AutoApproveEdits {
+        seq: u64,
+        session_id: Option<String>,
+        on: bool,
+    },
 }
 
 // `foreign`: Kotlin implements this trait; the Rust engine calls in.
@@ -275,6 +312,75 @@ impl EventSink for SinkAdapter {
                     seq,
                     session_id,
                     dropped_messages: dropped_messages as u64,
+                },
+                Event::ToolStarted {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    name,
+                    path,
+                } => CoreEvent::ToolStarted {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    name,
+                    path,
+                },
+                Event::ToolFinished {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    ok,
+                    duration_ms,
+                    preview,
+                } => CoreEvent::ToolFinished {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    ok,
+                    duration_ms,
+                    preview,
+                },
+                Event::ApprovalRequested {
+                    seq,
+                    session_id,
+                    message_id,
+                    request_id,
+                    tool,
+                    path,
+                    detail,
+                } => CoreEvent::ApprovalRequested {
+                    seq,
+                    session_id,
+                    message_id,
+                    request_id,
+                    tool,
+                    path,
+                    detail,
+                },
+                Event::ApprovalResolved {
+                    seq,
+                    session_id,
+                    request_id,
+                    approved,
+                } => CoreEvent::ApprovalResolved {
+                    seq,
+                    session_id,
+                    request_id,
+                    approved,
+                },
+                Event::AutoApproveEdits {
+                    seq,
+                    session_id,
+                    on,
+                } => CoreEvent::AutoApproveEdits {
+                    seq,
+                    session_id,
+                    on,
                 },
             })
             .collect();
@@ -405,6 +511,56 @@ pub fn turn_stop(session_id: String) {
 #[uniffi::export]
 pub fn turn_resume(session_id: String) -> Result<(), FfiError> {
     engine()?.resume(&session_id).map_err(map_err)
+}
+
+// ---------------------------------------------------------------------------
+// M2: workspace + tool approvals
+// ---------------------------------------------------------------------------
+
+/// Enable file tools against a workspace root (= turn on agent mode).
+#[uniffi::export]
+pub fn workspace_set(root: String) -> Result<(), FfiError> {
+    engine()?.set_workspace(&root).map_err(map_err)
+}
+
+#[uniffi::export]
+pub fn workspace_current() -> Option<String> {
+    engine().ok().and_then(|e| e.workspace())
+}
+
+#[uniffi::export]
+pub fn workspace_clear() {
+    if let Ok(e) = engine() {
+        e.clear_workspace();
+    }
+}
+
+/// Answer a pending approval sheet. scope: "once" | "session" | "project".
+#[uniffi::export]
+pub fn approval_resolve(request_id: u64, approved: bool, scope: String) {
+    let s = match scope.as_str() {
+        "session" => palmcode_agent::ApprovalScope::Session,
+        "project" => palmcode_agent::ApprovalScope::Project,
+        _ => palmcode_agent::ApprovalScope::Once,
+    };
+    if let Ok(e) = engine() {
+        e.resolve_approval(request_id, approved, s);
+    }
+}
+
+/// "Accept edits for this session" toggle (opt-in, always visible).
+#[uniffi::export]
+pub fn session_set_accept_edits(session_id: String, on: bool) {
+    if let Ok(e) = engine() {
+        e.set_accept_edits(&session_id, on);
+    }
+}
+
+#[uniffi::export]
+pub fn turn_set_max_output_tokens(max: Option<u32>) {
+    if let Ok(e) = engine() {
+        e.set_max_output_tokens(max);
+    }
 }
 
 #[uniffi::export]
