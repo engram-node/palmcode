@@ -6,6 +6,8 @@
 
 pub mod caps;
 pub mod error;
+pub mod glob;
+pub mod grep;
 pub mod guards;
 pub mod list;
 pub mod paths;
@@ -26,7 +28,12 @@ pub struct Ctx<'a> {
 /// Deterministic schema list for the LLM request (byte-stable order:
 /// prefix-cache friendly, deliverable I).
 pub fn schemas() -> Vec<serde_json::Value> {
-    vec![read::schema(), list::schema()]
+    vec![
+        read::schema(),
+        list::schema(),
+        glob::schema(),
+        grep::schema(),
+    ]
 }
 
 /// Dispatch one tool call. Unknown tool -> model-readable error.
@@ -41,6 +48,16 @@ pub fn run_tool(name: &str, args_json: &str, ctx: &Ctx) -> Result<Capped> {
             let args: list::Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError::Guard(format!("invalid ls args: {e}")))?;
             list::run(&args, ctx.roots, ctx.spill)
+        }
+        "glob" => {
+            let args: glob::Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError::Guard(format!("invalid glob args: {e}")))?;
+            glob::run(&args, ctx.roots, ctx.spill)
+        }
+        "grep" => {
+            let args: grep::Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError::Guard(format!("invalid grep args: {e}")))?;
+            grep::run(&args, ctx.roots, ctx.spill)
         }
         other => Err(ToolError::Guard(format!("unknown tool: {other}"))),
     }
