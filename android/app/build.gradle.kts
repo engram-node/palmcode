@@ -123,6 +123,13 @@ val sdkDir = project.providers.gradleProperty("sdk.dir")
     .get()
 val ndkDir = File(sdkDir, "ndk/$ndkVersionPin")
 
+// Any workspace crate source can change the .so — NOT only ffi/src.
+// vendor/ is content-pinned by Cargo.lock (committed), so lock-file changes
+// already invalidate; tracking it would hash ~2M lines per build.
+val coreSources = fileTree(coreDir) {
+    include("*/src/**/*.rs", "*/build.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+}
+
 fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvider<Exec>> =
     abiTriples.keys.map { abi ->
         tasks.register<Exec>("cargoNdk${variant.replaceFirstChar(Char::uppercase)}$abi") {
@@ -131,8 +138,7 @@ fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvide
             workingDir = coreDir
             environment(cargoEnvironment(ndkDir))
             outputs.dir(layout.buildDirectory.dir("rust/$variant/jniLibs/$abi"))
-            inputs.dir(coreDir.resolve("ffi/src"))
-            inputs.files(coreDir.resolve("Cargo.toml"), coreDir.resolve("Cargo.lock"))
+            inputs.files(coreSources)
             commandLine(
                 cargoCmd, "ndk",
                 "--target", abi,
@@ -155,7 +161,7 @@ val uniffiBindgen = tasks.register<Exec>("uniffiBindgen") {
     dependsOn(tasks.named("cargoNdkDebugarm64-v8a"))
     workingDir = coreDir
     environment(cargoEnvironment(ndkDir))
-    inputs.dir(coreDir.resolve("ffi/src"))
+    inputs.files(coreSources)
     outputs.dir(layout.buildDirectory.dir("generated/uniffi"))
     commandLine(
         cargoCmd, "run", "--quiet",

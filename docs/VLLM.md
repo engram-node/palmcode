@@ -50,6 +50,18 @@ actionable fix:
 3. **Reasoning models need headroom.** `max_tokens` < ~512 produces
    `finish_reason: "length"` with empty visible content (all budget burned
    in `reasoning_content`). Defaults: main ≥ 4096, fast ≥ 1024.
+4. **Tools go out OpenAI-nested** — `{"type":"function","function":{name,
+   description, parameters}}`. The tools crate keeps a provider-neutral
+   flat form (`input_schema`) and the builder translates (M2; sending the
+   flat form is a **HTTP 400** behind litellm:
+   `('body','tools',0,'function') Field required` — observed on device
+   2026-10-12). `tool_choice: "auto"` accompanies non-empty tools.
+5. **Tool-call frames (GLM parser `glm45`)**: streamed as
+   `delta.tool_calls[]` chunks — index-keyed, `id`+`function.name` on the
+   first chunk of a call, argument JSON appended in later
+   `function.arguments` deltas. Parallel calls interleave by `index`; one
+   trace lacked `index` on later calls (accumulator falls back to the open
+   call — `accumulator::tests::indexless_id_fallback`).
 
 ## Token accounting
 
@@ -108,6 +120,18 @@ M1 acceptance for the SSE parser:
   sequence must equal the canonical parse.
 - Mid-chunk JSON splits, CRLF/LF mixes, `data: [DONE]`, comment lines
   (`:` keepalives) all covered by fixtures or unit tests.
+
+M2 notes on the fixture set:
+
+- `tool_call` / `parallel_tools` / `tool_result_followup` are real Grid
+  GLM captures; their in-fixture tool names (`read_file`, …) predate the
+  M2 tool rename — the tool-loop tests **rewrite the names in memory at
+  replay**; the bytes on disk stay untouched.
+- **No fixture carries `usage`** (Grid ignores `include_usage`; usage
+  arrives only in the final chunk's `usage` when the server adds it, and
+  Grid's tool streams show none). Tests that need usage (`note_usage_
+  sample`, EMA token accounting) build synthetic usage chunks; do not
+  trust real-traffic fixtures for usage-dependent assertions.
 
 ## Probe
 
