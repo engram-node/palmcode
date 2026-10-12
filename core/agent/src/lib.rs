@@ -400,6 +400,16 @@ impl Engine {
         // a tool left "pending" means the app died mid-execution: never
         // re-run; history replay synthesizes an "unknown outcome" result
         engine.store.mark_pending_tools_interrupted()?;
+        // tools survive restarts: re-attach the most recently used workspace
+        // (validated again — the SAF copy or the path may be gone)
+        if let Some(w) = engine
+            .store
+            .workspaces_list()?
+            .into_iter()
+            .find(|w| std::path::Path::new(&w.root_path).is_dir())
+        {
+            let _ = engine.set_workspace(&w.root_path);
+        }
         Ok(engine)
     }
 

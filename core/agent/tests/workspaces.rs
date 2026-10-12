@@ -104,3 +104,18 @@ fn removing_active_root_clears_the_workspace() {
     engine.workspace_remove(&w.id, false).unwrap();
     assert_eq!(engine.workspace(), None);
 }
+
+#[test]
+fn most_recent_workspace_is_restored_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().to_str().unwrap().to_string();
+    {
+        let e = Engine::start(&db, std::sync::Arc::new(Sink(Mutex::new(vec![])))).unwrap();
+        e.workspace_register("demo", &root).unwrap();
+        e.set_workspace(&root).unwrap();
+    }
+    let e2 = Engine::start(&db, std::sync::Arc::new(Sink(Mutex::new(vec![])))).unwrap();
+    assert_eq!(e2.workspace().as_deref(), Some(root.as_str()));
+}
