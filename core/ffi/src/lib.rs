@@ -603,6 +603,26 @@ pub fn workspace_metrics(root_path: String) -> Result<WorkspaceMetricsRecord, Ff
     })
 }
 
+#[derive(uniffi::Record)]
+pub struct ToolDiffRecord {
+    pub path: String,
+    pub diff: String,
+}
+
+/// Unified diffs (preimage vs. current) for one tool call's card.
+#[uniffi::export]
+pub fn tool_diff(call_id: String) -> Result<Vec<ToolDiffRecord>, FfiError> {
+    Ok(engine()?
+        .tool_diff(&call_id)
+        .map_err(map_err)?
+        .into_iter()
+        .map(|d| ToolDiffRecord {
+            path: d.path,
+            diff: d.diff,
+        })
+        .collect())
+}
+
 /// Answer a pending approval sheet. scope: "once" | "session" | "project".
 #[uniffi::export]
 pub fn approval_resolve(request_id: u64, approved: bool, scope: String) {

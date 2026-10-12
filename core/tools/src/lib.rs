@@ -5,6 +5,7 @@
 //! filesystem; tool errors are model-readable and never crash the loop.
 
 pub mod caps;
+pub mod diff;
 pub mod edit;
 pub mod error;
 pub mod glob;

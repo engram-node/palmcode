@@ -348,6 +348,13 @@ pub struct WorkspaceMetrics {
     pub file_count: u64,
 }
 
+/// One preimage'd file's diff for the tool card.
+#[derive(Debug, Clone)]
+pub struct ToolDiff {
+    pub path: String,
+    pub diff: String,
+}
+
 impl Engine {
     pub fn start(db_path: &Path, sink: Arc<dyn EventSink>) -> Result<Self, EngineError> {
         let store = Store::open(db_path)?;
@@ -474,6 +481,29 @@ impl Engine {
             self.clear_workspace();
         }
         Ok(())
+    }
+
+    /// Unified diffs for a call's preimages vs. the current file content
+    /// (tool card expand, deliverable H). Files without preimages / deleted
+    /// workspaces yield an empty diff for their path.
+    pub fn tool_diff(&self, call_id: &str) -> Result<Vec<ToolDiff>, EngineError> {
+        let mut out = Vec::new();
+        for p in self.store.preimages_for(call_id)? {
+            let old = match (&p.content, &p.spill_path) {
+                (Some(c), _) => c.clone(),
+                (None, Some(sp)) => std::fs::read_to_string(sp).unwrap_or_default(),
+                (None, None) => String::new(),
+            };
+            let diff = match &self.workspace.lock().unwrap().clone() {
+                Some(ws) => {
+                    let cur = std::fs::read_to_string(ws.join(&p.path)).unwrap_or_default();
+                    palmcode_tools::diff::unified_diff(&p.path, &old, &cur, 3)
+                }
+                None => String::new(),
+            };
+            out.push(ToolDiff { path: p.path, diff });
+        }
+        Ok(out)
     }
 
     /// Total size + file count of a root (gitignore-aware walk; counts are
@@ -1323,9 +1353,14 @@ async fn run_turn(task: TurnTask) {
                     .put_part(&session_id, message_id, "text", &full_text);
             }
             let completion = u32::try_from(total_completion).unwrap_or(u32::MAX);
-            let decode_tps = first_ttft.map(|t| {
+            // suppress silly values: decode windows < 250 ms have no rhythm
+            let decode_tps = first_ttft.and_then(|t| {
                 let d = turn_start.elapsed().saturating_sub(t).as_secs_f64();
-                if d > 0.0 { completion as f64 / d } else { 0.0 }
+                if d >= 0.25 {
+                    Some(completion as f64 / d)
+                } else {
+                    None
+                }
             });
             let _ = engine
                 .store
