@@ -51,7 +51,29 @@ pub fn build_body(req: &ChatRequest) -> Result<serde_json::Value, LlmError> {
     if let Some(tools) = &req.tools
         && !tools.is_empty()
     {
-        obj.insert("tools".into(), serde_json::Value::Array(tools.clone()));
+        // Schemas arrive provider-neutral ({name, description, input_schema});
+        // the OpenAI/vLLM wire wants nested function objects.
+        let wire: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                let name = t.get("name").cloned().unwrap_or_default();
+                let description = t.get("description").cloned().unwrap_or_default();
+                let params = t
+                    .get("input_schema")
+                    .or_else(|| t.get("parameters"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": params,
+                    }
+                })
+            })
+            .collect();
+        obj.insert("tools".into(), serde_json::Value::Array(wire));
         obj.insert(
             "tool_choice".into(),
             serde_json::Value::String("auto".into()),
@@ -117,6 +139,34 @@ mod tests {
         assert!(s.contains(r#""stream":true"#));
         assert!(s.contains(r#""include_usage":true"#));
         assert!(s.contains(r#""continuous_usage_stats":false"#));
+    }
+
+    #[test]
+    fn tools_go_out_openai_shaped() {
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![Message::user("u")],
+            max_tokens: 1024,
+            continuous_usage: false,
+            sampling: None,
+            extra_body: None,
+            tools: Some(vec![serde_json::json!({
+                "name": "read",
+                "description": "Read a file",
+                "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+            })]),
+        };
+        let body = build_body(&req).unwrap();
+        let t = &body["tools"][0];
+        assert_eq!(t["type"], "function");
+        assert_eq!(t["function"]["name"], "read");
+        assert_eq!(t["function"]["description"], "Read a file");
+        assert!(t["function"]["parameters"]["properties"]["path"].is_object());
+        assert!(
+            t.get("input_schema").is_none(),
+            "no anthropic key on the wire"
+        );
+        assert_eq!(body["tool_choice"], "auto");
     }
 
     #[test]
