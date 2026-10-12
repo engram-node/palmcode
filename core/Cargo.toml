@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["agent", "bench", "exec", "ffi", "host-cli", "llm", "store", "tools"]
+members = ["agent", "bench", "exec", "ffi", "host-cli", "llm", "perms", "store", "tools"]
 
 [workspace.package]
 version = "0.1.0"
