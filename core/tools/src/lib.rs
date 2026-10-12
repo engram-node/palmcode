@@ -5,6 +5,7 @@
 //! filesystem; tool errors are model-readable and never crash the loop.
 
 pub mod caps;
+pub mod edit;
 pub mod error;
 pub mod glob;
 pub mod grep;
@@ -33,6 +34,8 @@ pub fn schemas() -> Vec<serde_json::Value> {
         list::schema(),
         glob::schema(),
         grep::schema(),
+        edit::write_schema(),
+        edit::edit_schema(),
     ]
 }
 
@@ -58,6 +61,18 @@ pub fn run_tool(name: &str, args_json: &str, ctx: &Ctx) -> Result<Capped> {
             let args: grep::Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError::Guard(format!("invalid grep args: {e}")))?;
             grep::run(&args, ctx.roots, ctx.spill)
+        }
+        "write" => {
+            let args: edit::WriteArgs = serde_json::from_str(args_json)
+                .map_err(|e| ToolError::Guard(format!("invalid write args: {e}")))?;
+            let summary = edit::run_write(&args, ctx.roots, ctx.reads)?;
+            ctx.spill.apply(summary, caps::SEARCH)
+        }
+        "edit" => {
+            let args: edit::EditArgs = serde_json::from_str(args_json)
+                .map_err(|e| ToolError::Guard(format!("invalid edit args: {e}")))?;
+            let out = edit::run_edit(&args, ctx.roots, ctx.reads)?;
+            ctx.spill.apply(out.summary, caps::SEARCH)
         }
         other => Err(ToolError::Guard(format!("unknown tool: {other}"))),
     }
