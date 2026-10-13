@@ -96,7 +96,12 @@ val gnuSelfContained: File? = File(System.getProperty("user.home"), ".rustup/too
 val msysBinutils = File("C:\\msys64\\mingw64\\bin")
 
 fun cargoEnvironment(ndkDir: File): Map<String, String> = buildMap {
+    // One NDK, everywhere: AGP's ndkVersion, CI's sdkmanager install and
+    // cargo-ndk's env all agree on ndkVersionPin. Set BOTH legacy names so a
+    // stray inherited ANDROID_NDK_ROOT pointing at another NDK cannot split
+    // the toolchain (observed: 27.3 vs 30.0 warning mid-build).
     put("ANDROID_NDK_HOME", ndkDir.absolutePath)
+    put("ANDROID_NDK_ROOT", ndkDir.absolutePath)
     // Reproducibility: assert()/__FILE__ in vendored C (tree-sitter grammars)
     // would bake absolute build paths into the .so; NDEBUG compiles asserts
     // out, the prefix-map normalizes anything left. cc-rs splits the env var
