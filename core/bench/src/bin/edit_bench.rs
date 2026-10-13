@@ -81,8 +81,9 @@ fn verify(ws: &std::path::Path, expect: &[(&str, &str)]) -> Vec<String> {
     fails
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
+// sync main: Engine owns its runtime; nesting it inside a tokio runtime
+// panics ("Cannot start a runtime from within a runtime").
+fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--list") {
         for t in TASKS {
@@ -166,7 +167,7 @@ async fn main() {
             }
             fin = done;
             if fin.is_none() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
         let st = sink.inner.lock().unwrap();

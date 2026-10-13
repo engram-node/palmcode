@@ -88,6 +88,9 @@ files (`run-as cat`).
 | Kill mid-tool (`am force-stop` during pending approval) | session → `interrupted`; resume → killed edits appear as ✗ cards and are **never re-run**; model re-read both files, re-issued fresh calls, turn completed; final files: `tick_work()` once, `pulse()` intact, lib.rs updated |
 | FUSE path safety | `/storage/emulated/0/…` roots: `realpath` blocked for app UIDs → RootSet falls back to lexical root (fbf20d8); adb-pushed-and-chowned paths stay unreadable by design |
 | Organic user probe (owner, unscripted) | "hello / hoi / what all you can do" — model answered in BUILD mode with workspace-aware capability list |
+| Release (R8) smoke, same device 2026-10-13 | read-only turn: `✓ ls src · 8 ms` card, correct answer; metrics `ttft 869 ms · 34.4 tok/s · 105 tok · cache 55%` (cache-ratio fix confirmed live: ≤100%) |
+| Release cold start ×4 (`am start -W`) | **537 / 389 / 346 / 345 ms** (< 1.2 s) — tree-sitter .so costs ~40–70 ms vs M1 |
+| Release arm64 unsigned APK | **7.24 MB** (M1: 5.14 MB; target 30 MB / hard 40 MB — green) |
 
 Issues found live and fixed same-day: OpenAI tool shape (400), `s`
 unused-binding on linux (CI rust), C-side path embeds breaking byte-repro
