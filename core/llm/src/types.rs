@@ -95,6 +95,14 @@ impl Message {
             tool_call_id: None,
         }
     }
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 /// Which reasoning field the server streams (probe result).

@@ -7,9 +7,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
+palmcode-agent = { path = "../agent" }
 palmcode-llm = { path = "../llm" }
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 [[bin]]
 name = "palmcode-bench"
 path = "src/main.rs"
+
+[[bin]]
+name = "edit-bench"
+path = "src/bin/edit_bench.rs"

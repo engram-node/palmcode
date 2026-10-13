@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: a.txt
+@@
+-old line
++new line
+*** Add File: c.txt
++brand new
++file here
+*** Delete File: b.txt
+*** End Patch

@@ -33,7 +33,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Unsigned: F-Droid signs after building. Local verification uses
             // assembleDebug (debug-signed).
@@ -96,6 +97,13 @@ val msysBinutils = File("C:\\msys64\\mingw64\\bin")
 
 fun cargoEnvironment(ndkDir: File): Map<String, String> = buildMap {
     put("ANDROID_NDK_HOME", ndkDir.absolutePath)
+    // Reproducibility: assert()/__FILE__ in vendored C (tree-sitter grammars)
+    // would bake absolute build paths into the .so; NDEBUG compiles asserts
+    // out, the prefix-map normalizes anything left. cc-rs splits the env var
+    // on whitespace — the forward-slashed, space-free form is intentional.
+    val ccFlags = "-DNDEBUG -ffile-prefix-map=${coreDir.absolutePath.replace('\\', '/')}=core"
+    put("CFLAGS_aarch64_linux_android", ccFlags)
+    put("CFLAGS_x86_64_linux_android", ccFlags)
     if (isWindows) {
         val front = listOfNotNull(
             msysBinutils.takeIf { it.isDirectory }?.absolutePath,
@@ -122,6 +130,13 @@ val sdkDir = project.providers.gradleProperty("sdk.dir")
     .get()
 val ndkDir = File(sdkDir, "ndk/$ndkVersionPin")
 
+// Any workspace crate source can change the .so — NOT only ffi/src.
+// vendor/ is content-pinned by Cargo.lock (committed), so lock-file changes
+// already invalidate; tracking it would hash ~2M lines per build.
+val coreSources = fileTree(coreDir) {
+    include("*/src/**/*.rs", "*/build.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+}
+
 fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvider<Exec>> =
     abiTriples.keys.map { abi ->
         tasks.register<Exec>("cargoNdk${variant.replaceFirstChar(Char::uppercase)}$abi") {
@@ -130,8 +145,7 @@ fun registerCargoNdk(variant: String, extraArgs: List<String>): List<TaskProvide
             workingDir = coreDir
             environment(cargoEnvironment(ndkDir))
             outputs.dir(layout.buildDirectory.dir("rust/$variant/jniLibs/$abi"))
-            inputs.dir(coreDir.resolve("ffi/src"))
-            inputs.files(coreDir.resolve("Cargo.toml"), coreDir.resolve("Cargo.lock"))
+            inputs.files(coreSources)
             commandLine(
                 cargoCmd, "ndk",
                 "--target", abi,
@@ -154,7 +168,7 @@ val uniffiBindgen = tasks.register<Exec>("uniffiBindgen") {
     dependsOn(tasks.named("cargoNdkDebugarm64-v8a"))
     workingDir = coreDir
     environment(cargoEnvironment(ndkDir))
-    inputs.dir(coreDir.resolve("ffi/src"))
+    inputs.files(coreSources)
     outputs.dir(layout.buildDirectory.dir("generated/uniffi"))
     commandLine(
         cargoCmd, "run", "--quiet",

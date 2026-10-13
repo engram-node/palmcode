@@ -30,9 +30,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
 import dev.palmcode.app.AppState
+import dev.palmcode.app.Approval
 import dev.palmcode.app.ChatMsg
 import dev.palmcode.app.CoreManager
 import dev.palmcode.app.Screen
+import dev.palmcode.app.ToolCard
+import dev.palmcode.core.toolDiff
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun ChatScreen(sessionId: String) {
@@ -57,6 +62,10 @@ fun ChatScreen(sessionId: String) {
             if (transcript.size - lastVisible <= 2) listState.scrollToItem(transcript.size - 1)
         }
     }
+    // land at the message end (metrics footer) when a turn finishes
+    LaunchedEffect(tail?.streaming) {
+        if (tail != null && tail.streaming == false) listState.scrollToItem(transcript.size - 1)
+    }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         Row(
@@ -77,6 +86,17 @@ fun ChatScreen(sessionId: String) {
             }
         }
 
+        // workspace toggle: BUILD mode needs one linked root
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            val ws = AppState.workspace
+            TextButton(onClick = { AppState.screen = Screen.Workspaces }) {
+                Text(
+                    ws?.substringAfterLast('/')?.let { "workspace: $it" } ?: "no workspace (chat only)",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
@@ -84,6 +104,23 @@ fun ChatScreen(sessionId: String) {
         ) {
             items(transcript, key = { it.id }) { msg ->
                 MessageBubble(sessionId, msg)
+            }
+        }
+
+        if (AppState.workspace != null) {
+            val accepted = AppState.acceptEdits[sessionId] == true
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                TextButton(onClick = { CoreManager.setAcceptEdits(sessionId, !accepted) }) {
+                    Text(
+                        if (accepted) "edits: auto-accepted" else "edits: ask each time",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (accepted) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outline
+                        },
+                    )
+                }
             }
         }
 
@@ -118,6 +155,10 @@ fun ChatScreen(sessionId: String) {
             }
         }
     }
+
+    AppState.approvals.firstOrNull { it.sessionId == sessionId }?.let { approval ->
+        ApprovalSheet(approval)
+    }
 }
 
 @Composable
@@ -148,6 +189,14 @@ private fun MessageBubble(sessionId: String, msg: ChatMsg) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.outline,
             )
+        }
+        if (msg.tools.isNotEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                for (card in msg.tools) ToolCardView(card)
+            }
         }
         msg.error?.let { err ->
             Surface(color = MaterialTheme.colorScheme.errorContainer) {
@@ -212,5 +261,114 @@ private fun MetricsLine(msg: ChatMsg) {
         parts.joinToString(" · "),
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.outline,
+    )
+}
+
+@Composable
+private fun ToolCardView(card: ToolCard) {
+    var expanded by remember(card.id) { mutableStateOf(false) }
+    var diffs by remember(card.id) { mutableStateOf<List<dev.palmcode.core.ToolDiffRecord>?>(null) }
+    LaunchedEffect(card.id, expanded, card.done) {
+        if (expanded && card.done && (card.name == "write" || card.name == "edit" || card.name == "apply_patch")) {
+            diffs = withContext(Dispatchers.IO) { runCatching { toolDiff(card.id) }.getOrNull() }
+        }
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(6.dp)) {
+            TextButton(onClick = { expanded = !expanded }) {
+                val icon = when {
+                    !card.done -> "…"
+                    card.ok -> "✓"
+                    else -> "✗"
+                }
+                val label = buildString {
+                    append(if (expanded) "▾ " else "▸ ")
+                    append("$icon ${card.name}")
+                    card.path?.let { append(" $it") }
+                    if (card.done) append(" · ${card.durationMs} ms")
+                }
+                Text(label, style = MaterialTheme.typography.labelMedium)
+            }
+            if (expanded) {
+                if (card.preview.isNotEmpty()) {
+                    Text(
+                        card.preview,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                }
+                diffs?.forEach { d ->
+                    if (d.diff.isNotEmpty()) {
+                        Text(
+                            d.path,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        )
+                        for (line in d.diff.lineSequence()) {
+                            val color = when {
+                                line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@") ->
+                                    MaterialTheme.colorScheme.outline
+                                line.startsWith("-") -> MaterialTheme.colorScheme.error
+                                line.startsWith("+") -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            Text(
+                                line,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                color = color,
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApprovalSheet(approval: Approval) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { CoreManager.resolveApproval(approval.requestId, false, "once") },
+        title = { Text("Allow ${approval.tool}?") },
+        text = {
+            Column {
+                Text(approval.path, style = MaterialTheme.typography.bodyMedium)
+                if (approval.detail.isNotEmpty()) {
+                    Text(
+                        approval.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                // extra scope choices beyond the default buttons
+                Row(Modifier.padding(top = 8.dp)) {
+                    TextButton(onClick = {
+                        CoreManager.resolveApproval(approval.requestId, true, "session")
+                    }) { Text("Allow for session") }
+                    TextButton(onClick = {
+                        CoreManager.resolveApproval(approval.requestId, true, "project")
+                    }) { Text("Always in project") }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                CoreManager.resolveApproval(approval.requestId, true, "once")
+            }) { Text("Allow once") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                CoreManager.resolveApproval(approval.requestId, false, "once")
+            }) { Text("Deny") }
+        },
     )
 }
