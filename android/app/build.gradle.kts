@@ -212,6 +212,33 @@ val execProbeTasks = abiTriples.map { (abi, triple) ->
     }
 }
 
+// ---------------------------------------------------------------------------
+// Userland (busybox/rg/git) from checksum-verified source — userland/build.sh.
+// Lands in build/userland/jniLibs/<abi>/lib{name}.so next to libexecprobe.so.
+// ---------------------------------------------------------------------------
+
+val userlandBuild = tasks.register<Exec>("userlandBuild") {
+    group = "build"
+    description = "Cross-build busybox/ripgrep/git from source (needs bash+make; MSYS2 on Windows, system tools on Linux CI)"
+    val outDir = layout.buildDirectory.dir("userland")
+    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"))
+    outputs.dir(outDir)
+    outputs.cacheIf { true }
+    environment("NDK_HOME", ndkDir.absolutePath)
+    environment("OUT_DIR", outDir.get().asFile.absolutePath)
+    // MSYS2 bash on Windows (proven path for the kbuild/autoconf host steps);
+    // MUST be a login shell: non-login MSYS2 lacks /tmp, /usr/bin on PATH and
+    // working `ln -s` (all three observed failing under direct gradle spawn).
+    executable = if (isWindows) "C:\\msys64\\usr\\bin\\bash.exe" else "bash"
+    if (isWindows) {
+        val scriptPosix = rootProject.file("userland/build.sh").absolutePath
+            .replace('\\', '/').replace(Regex("^([A-Za-z]):"), "/$1").lowercase()
+        args("-lc", "\"$scriptPosix\"")
+    } else {
+        args(rootProject.file("userland/build.sh").absolutePath)
+    }
+}
+
 // License texts (Apache-2.0 obligation stack, GPL source offer) ship as
 // assets; the app shows them from the home screen.
 val copyLicenseAssets = tasks.register<Copy>("copyLicenseAssets") {
@@ -224,6 +251,7 @@ tasks.named("preBuild") {
     dependsOn(cargoNdkRelease)
     dependsOn(uniffiBindgen)
     dependsOn(execProbeTasks)
+    dependsOn(userlandBuild)
     dependsOn(copyLicenseAssets)
 }
 

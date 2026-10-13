@@ -542,6 +542,9 @@ pub struct WorkspaceRecord {
     pub root_path: String,
     pub created_at: i64,
     pub last_used_at: i64,
+    /// M3 trust: untrusted ignores project `.palmcode/config.json` entirely;
+    /// trusted honors ask/deny rules from it (allow rules stripped).
+    pub trusted: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -558,6 +561,7 @@ fn to_record(w: palmcode_store::StoredWorkspace) -> WorkspaceRecord {
         root_path: w.root_path,
         created_at: w.created_at,
         last_used_at: w.last_used_at,
+        trusted: w.trusted,
     }
 }
 
@@ -590,6 +594,14 @@ pub fn workspaces_list() -> Result<Vec<WorkspaceRecord>, FfiError> {
 pub fn workspace_remove(id: String, delete_files: bool) -> Result<(), FfiError> {
     engine()?
         .workspace_remove(&id, delete_files)
+        .map_err(map_err)
+}
+
+/// M3 trust toggle (applies on next turn; see agent doc).
+#[uniffi::export]
+pub fn workspace_set_trusted(id: String, trusted: bool) -> Result<(), FfiError> {
+    engine()?
+        .workspace_set_trusted(&id, trusted)
         .map_err(map_err)
 }
 

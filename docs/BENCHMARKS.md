@@ -20,6 +20,29 @@ per-turn overhead number; M6 publishes the full table.
 | Cold start (release/R8) | < 1.2 s | **316–463 ms** across 4 runs (`am start -W` TotalTime; first 463, then 331/316/301; sessions + Keystore intact across debug->release install) | motorola edge 50 neo | 2026-10-12 |
 | Cold start (release/R8, M2 w/ tree-sitter .so) | < 1.2 s | **345–537 ms** across 4 runs (537 first, 389/346/345 after; +~35–75 ms vs M1 for the +9 MB raw grammars) | motorola edge 50 neo | 2026-10-13 |
 | APK size arm64 (M2) | < 30 MB target | **7.24 MB** release unsigned (M1: 5.14 MB; +2.1 MB compressed = tree-sitter grammars + tool code) | host `assembleRelease` | 2026-10-13 |
+
+### Release APK composition & the 22/25.7 → 5.1/7.2 MB story (arm64 unsigned, 2026-10-13)
+
+Why it shrank: the M0/M1 APKs (~22 MB / 25.74 MB unshrunk) were ~88% dead
+DEX — `classes2.dex` of 23.66 MB sat in the APK uncompressed. M1 enabled R8
+full-mode + `shrinkResources` (PR #5): DEX collapsed to ~2.4 MB and the APK
+to 5.14 MB. M2 grew it back to 7.24 MB by adding 9 tree-sitter grammars
+(+9.13 MB raw inside the Rust `.so`, ~+2.1 MB after deflate) plus tool code.
+
+| Entry | In-APK (deflate) | Raw | What it is |
+|---|---:|---:|---|
+| `lib/arm64-v8a/libpalmcode_ffi.so` | **4.61 MB** | 17.01 MB | Rust core: ffi + agent + llm + tools + store + sqlite + blahaj + 9 tree-sitter grammars |
+| `classes.dex` | **2.42 MB** (stored) | 2.42 MB | Kotlin/Compose app, R8-shrunk |
+| `resources.arsc` | 0.09 MB | 0.09 MB | compiled resources |
+| `lib/arm64-v8a/libjnidispatch.so` | 0.038 MB | 0.162 MB | JNA (SQLite) |
+| licenses/assets/manifest/prof | < 0.05 MB | — | THIRD_PARTY_LICENSES, baseline.prof, etc. |
+| **userland (busybox/rg/git)** | **0 — NOT packaged yet** | — | built + device-verified in M1 spikes; packaging lands with `userland/build.sh` (below) |
+| **Total** | **7.24 MB** | 19.88 MB | hard limit 40 MB → **~32 MB headroom** |
+
+Userland size forecast (stripped aarch64, from device-verified spike builds):
+git 3.55 MB + ripgrep ~2.7 MB + busybox ~1.1 MB ≈ **+7.4 MB raw → ~+3.5–4 MB
+in-APK** per ABI → arm64 APK ≈ 11 MB. x86_64 build doubles only the
+per-ABI entries in the universal APK.
 | M2 tool latency on device | read < 10 ms / ls < 300 ms-class | `read` **3 ms**, `grep` **7 ms**, `edit` **0–5 ms**, `ls src` **8 ms** (Grid tool cards, demo workspace) | motorola edge 50 neo | 2026-10-13 |
 | edit-bench (K) vs Grid, glm-5.3-flash | metrics run | **18/20 pass (90%)**, mean **12.3 s**/task, **98 tool calls (1 tool error)**, tokens 25 895 in / 5 448 out. Fails are model-level: `rs-extract-struct` chose `&str` over `String`; `js-const` kept a `3.14159` occurrence. | host `cargo run -p palmcode-bench --bin edit-bench` | 2026-10-13 |
 | App RSS idle (M1 session list) | inform 150 MB core budget | **native heap 21 MB**, total PSS 150 MB/RSS 251 MB (Compose+ART included) | motorola edge 50 neo | 2026-10-11 |

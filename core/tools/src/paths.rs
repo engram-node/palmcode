@@ -22,19 +22,29 @@ impl RootSet {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
         let mut out = Vec::new();
         for r in roots {
-            // shortcut: Android FUSE (/storage/emulated, /sdcard) blocks
-            // realpath() traversal for app processes — keep the lexical root
-            // and containment stays lexical too; upgrade: canonicalize via a
-            // SAF document-id instead of realpath.
-            let root = std::fs::canonicalize(&r)
-                .map(|c| strip_verbatim(&c))
-                .unwrap_or_else(|_| {
+            // Private-storage roots MUST be canonical (symlink containment
+            // rests on it) — only a PermissionDenied falls back to lexical:
+            // Android FUSE (/storage/emulated, /sdcard) blocks realpath()
+            // traversal for app UIDs, and containment stays consistent
+            // because the resolve side shares the same lexical basis.
+            // shortcut: symlink-escape protection is lexical-only on FUSE
+            // roots; upgrade: canonicalize via a SAF document-id instead.
+            let root = match std::fs::canonicalize(&r) {
+                Ok(c) => strip_verbatim(&c),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     tracing::warn!(
                         root = %r.display(),
-                        "canonicalize failed; using lexical workspace root"
+                        "canonicalize denied (FUSE?); using lexical workspace root"
                     );
                     lexical_normalize(&r)
-                });
+                }
+                Err(e) => {
+                    return Err(ToolError::BadPath(format!(
+                        "cannot canonicalize workspace root {}: {e}",
+                        r.display()
+                    )));
+                }
+            };
             if !root.is_dir() {
                 return Err(ToolError::BadPath(format!(
                     "workspace root is not a directory: {}",
@@ -199,6 +209,24 @@ mod tests {
         let (_d, rs) = setup();
         let p = rs.resolve("sub/deep/f.rs", None).unwrap();
         assert!(p.ends_with(Path::new("sub").join("deep").join("f.rs")));
+    }
+
+    #[test]
+    fn private_roots_are_canonical_not_lexical() {
+        // Item 4 contract: only PermissionDenied roots (Android FUSE) may
+        // use the lexical basis — host tmpdirs always canonicalize here.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let rs = RootSet::new(vec![root.clone()]).unwrap();
+        let expect = strip_verbatim(&std::fs::canonicalize(&root).unwrap());
+        assert_eq!(rs.roots()[0], expect, "host root must be canonical");
+        // canonicalize-fail reasons other than FUSE must hard-error:
+        let missing = dir.path().join("no-such-dir");
+        assert!(matches!(
+            RootSet::new(vec![missing]),
+            Err(ToolError::BadPath(_))
+        ));
     }
 
     #[test]

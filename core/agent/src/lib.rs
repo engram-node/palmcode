@@ -275,6 +275,7 @@ struct Inner {
 /// project rules are loaded per workspace once.
 pub(crate) struct ToolsCtx {
     workspace_root: PathBuf,
+    workspace_id: Option<String>,
     roots: palmcode_tools::RootSet,
     reads: palmcode_tools::ReadCache,
     spill: palmcode_tools::Spiller,
@@ -284,15 +285,22 @@ pub(crate) struct ToolsCtx {
 impl ToolsCtx {
     /// `spill_root` must be app-private storage (the workspace may live in
     /// shared/external storage and goes through permission walkups).
-    fn open(workspace_root: &Path, spill_root: &Path) -> Result<Self, EngineError> {
+    fn open(
+        workspace_root: &Path,
+        spill_root: &Path,
+        workspace_row: Option<palmcode_store::StoredWorkspace>,
+        db_approvals: Vec<(String, String)>,
+    ) -> Result<Self, EngineError> {
         let roots = palmcode_tools::RootSet::new(vec![workspace_root.to_path_buf()])
             .map_err(|e| EngineError::Tools(e.to_string()))?;
         let spill = palmcode_tools::Spiller::new(spill_root)
             .map_err(|e| EngineError::Tools(e.to_string()))?;
-        let perms =
-            palmcode_perms::Engine::load(workspace_root, None).map_err(EngineError::Tools)?;
+        let trusted = workspace_row.as_ref().map(|w| w.trusted).unwrap_or(false);
+        let perms = palmcode_perms::Engine::load(workspace_root, None, trusted, &db_approvals)
+            .map_err(EngineError::Tools)?;
         Ok(Self {
             workspace_root: workspace_root.to_path_buf(),
+            workspace_id: workspace_row.map(|w| w.id),
             roots,
             reads: palmcode_tools::ReadCache::new(),
             spill,
@@ -422,7 +430,14 @@ impl Engine {
         // validate once here so misconfig surfaces immediately
         palmcode_tools::RootSet::new(vec![p.clone()])
             .map_err(|e| EngineError::Tools(e.to_string()))?;
-        palmcode_perms::Engine::load(&p, None).map_err(EngineError::Tools)?;
+        let trusted = self
+            .store
+            .workspaces_list()
+            .ok()
+            .and_then(|ws| ws.into_iter().find(|w| w.root_path == root))
+            .map(|w| w.trusted)
+            .unwrap_or(false);
+        palmcode_perms::Engine::load(&p, None, trusted, &[]).map_err(EngineError::Tools)?;
         self.tools.lock().unwrap().clear(); // roots/perms changed: redo ctxs
         *self.workspace.lock().unwrap() = Some(p);
         let _ = self.store.workspace_touch_by_root(root);
@@ -463,6 +478,16 @@ impl Engine {
 
     pub fn workspaces_list(&self) -> Result<Vec<palmcode_store::StoredWorkspace>, EngineError> {
         Ok(self.store.workspaces_list()?)
+    }
+
+    /// M3 trust toggle. Untrusted (default): project config ignored;
+    /// trusted: project config may add ask/deny only. Applies to NEW tool
+    /// contexts — existing sessions rebuild on next turn start, so flip it
+    /// between turns, not mid-turn.
+    pub fn workspace_set_trusted(&self, id: &str, trusted: bool) -> Result<(), EngineError> {
+        self.store.workspace_set_trusted(id, trusted)?;
+        self.tools.lock().unwrap().clear();
+        Ok(())
     }
 
     /// Remove the registry row; files are deleted only under the app-private
@@ -559,7 +584,17 @@ impl Engine {
             return Some(ctx.clone());
         }
         let spill = self.spill_base.join(session_id);
-        let ctx = Arc::new(ToolsCtx::open(&ws, &spill).ok()?);
+        let row = self
+            .store
+            .workspaces_list()
+            .ok()?
+            .into_iter()
+            .find(|w| w.root_path == ws.display().to_string());
+        let approvals = row
+            .as_ref()
+            .and_then(|w| self.store.project_approvals_list(&w.id).ok())
+            .unwrap_or_default();
+        let ctx = Arc::new(ToolsCtx::open(&ws, &spill, row, approvals).ok()?);
         map.insert(session_id.to_string(), ctx.clone());
         Some(ctx)
     }
@@ -1688,14 +1723,14 @@ async fn check_permission(
                 }
                 ApprovalScope::Project => {
                     let _ = ctx.perms.allow_for_session(&spec.name, &rel_for_match);
-                    let _ = palmcode_perms::Engine::persist_project_allow(
-                        &ctx.workspace_root,
-                        palmcode_perms::RuleCfg {
-                            tool: spec.name.clone(),
-                            path: rel_for_match.clone(),
-                            decision: palmcode_perms::DecisionKind::Allow,
-                        },
-                    );
+                    // M3: project-scoped approvals persist in the app DB keyed
+                    // by workspace id — never into the repo (a hostile repo
+                    // must not inherit trust via its own files).
+                    if let Some(wid) = &ctx.workspace_id {
+                        let _ = engine
+                            .store
+                            .project_approval_add(wid, &spec.name, &rel_for_match);
+                    }
                 }
             }
             engine.emitter.emit_now(Event::ToolStarted {
