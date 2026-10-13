@@ -31,6 +31,20 @@ case "$(uname -s)" in
     # (include/asm-$ARCH doesn't exist for arm64/x86_64). .lnk shell shortcuts
     # satisfy ln/rc and nothing on our arches ever dereferences them.
     export MSYS="winsymlinks:lnk"
+    # rustup shims live in ~/.cargo/bin, which MSYS2 login shells don't
+    # inherit (`env: 'cargo': No such file or directory` at the rg step).
+    if ! command -v cargo >/dev/null 2>&1; then
+      for c in "$HOME/.cargo/bin" "$([ -n "${USERPROFILE:-}" ] && cygpath -u "$USERPROFILE")/.cargo/bin"; do
+        if [ -x "$c/cargo.exe" ] || [ -x "$c/cargo" ]; then
+          export PATH="$c:$PATH"
+          # the shim resolves toolchains via RUSTUP_HOME; under MSYS2 $HOME
+          # may be /home/<user>, so point both at the Windows profile
+          export CARGO_HOME="$(dirname "$c")"
+          export RUSTUP_HOME="$(dirname "$(dirname "$c")")/.rustup"
+          break
+        fi
+      done
+    fi
     ;;
   Linux*)                 NDK_PREBUILT=linux-x86_64  ;;
   *) echo "unsupported host: $(uname -s)" >&2; exit 1 ;;
@@ -52,6 +66,9 @@ export PATH="$NDK_BIN:$PATH"
 CACHE="${PALMCODE_USERLAND_CACHE:-$OUT_DIR/.cache-userland}"
 CACHE="$(cygpath -u "$CACHE" 2>/dev/null || echo "$CACHE")"
 mkdir -p "$CACHE" "$OUT_DIR"
+# wipe packaged outputs: stale spike .so files would otherwise ship in the
+# APK (libexecprobe.so was left behind by the M1 spike in this dir)
+rm -rf "$OUT_DIR/jniLibs"
 
 fetch() { # <url> <sha256> <dest>
   local url=$1 sha=$2 dest="$CACHE/$3"
@@ -144,7 +161,9 @@ done
 # --------------------------------------------------------------- ripgrep
 RG_TB=$(fetch "$RIPGREP_URL" "$RIPGREP_SHA256" "ripgrep-$RIPGREP_VERSION.tar.gz")
 RG_SRC="$CACHE/src/ripgrep-$RIPGREP_VERSION"
-extract "$RG_TB" "$RG_SRC" "crates/rg"
+# the rg binary crate is the repo ROOT (crates/ holds only libs) — Cargo.toml
+# is the marker
+extract "$RG_TB" "$RG_SRC" "Cargo.toml"
 
 for ABI in $ABIS; do
   T=$(triple_of "$ABI")

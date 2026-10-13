@@ -155,7 +155,9 @@ pub const TASKS: &[Task] = &[
         expect: &[
             ("web/math.mjs", "const PI"),
             ("web/math.mjs", "PI * r * r"),
-            ("!web/math.mjs", "3.14159"),
+            // the literal MUST survive in the const declaration; the
+            // magic *use* in the return line is what must disappear
+            ("!web/math.mjs", "return 3.14159"),
         ],
     },
     Task {

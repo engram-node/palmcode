@@ -45,4 +45,20 @@ in-APK** per ABI → arm64 APK ≈ 11 MB. x86_64 build doubles only the
 per-ABI entries in the universal APK.
 | M2 tool latency on device | read < 10 ms / ls < 300 ms-class | `read` **3 ms**, `grep` **7 ms**, `edit` **0–5 ms**, `ls src` **8 ms** (Grid tool cards, demo workspace) | motorola edge 50 neo | 2026-10-13 |
 | edit-bench (K) vs Grid, glm-5.3-flash | metrics run | **18/20 pass (90%)**, mean **12.3 s**/task, **98 tool calls (1 tool error)**, tokens 25 895 in / 5 448 out. Fails are model-level: `rs-extract-struct` chose `&str` over `String`; `js-const` kept a `3.14159` occurrence. | host `cargo run -p palmcode-bench --bin edit-bench` | 2026-10-13 |
+| edit-bench **v2**, glm-latest ×3 repeats (trace/JSONL) | metrics run | **59/60 pass (98%)** — `rs-extract-struct` 2/3 FLAKY (`&str` vs `String`), `js-const` 3/3 after verifier fix¹. Mean **10.8 s**/task, 273 tool calls (5 errors), tokens 76 599 in / 13 510 out. Matcher tiers: **exact 75/75** — no fallback tier ever engaged on Grid/GLM. | host, `--repeats 3 --trace-dir` | 2026-10-14 |
+| edit-bench **v2**, glm-5.3-flash ×3 repeats | metrics run | **57/60 pass (95%)** — `rs-extract-struct` 0/3 (consistently picks `&str`), js-const 3/3 after fix¹. Mean **7.7 s**/task, 290 calls (0 errors), tokens 77 004 in / 14 482 out. Tiers: **exact 67/67**. | host | 2026-10-14 |
+
+**¹ js-const verifier bug (fixed 2026-10-14):** the negative expectation
+"must not contain `3.14159`" was unsatisfiable — the literal must survive in
+the `const PI = 3.14159;` declaration. All 6 failing runs (both models) had in
+fact produced the fully correct edit; the check now targets the magic *use*
+(`return 3.14159`). Trace review also showed `rs-extract-struct` writes
+compilable Rust either way (`&str` needs a lifetime param, so `String` is the
+better default — expectation kept as the discriminator).
+
+**BlockAnchor is currently dead code on Grid/GLM:** across 120 model runs in
+v2, every successful edit matched `exact`; no `line-trimmed`,
+`indent-flexible`, or `block-anchor` hit ever occurred. The fallback tiers
+exist for models with sloppier whitespace habits — keep, but they add
+serialize/retry cost we have not observed to pay off with this provider.
 | App RSS idle (M1 session list) | inform 150 MB core budget | **native heap 21 MB**, total PSS 150 MB/RSS 251 MB (Compose+ART included) | motorola edge 50 neo | 2026-10-11 |
