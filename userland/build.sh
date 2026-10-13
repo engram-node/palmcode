@@ -39,6 +39,9 @@ esac
 # drive-letter form inside PATH entries is fine, but NDK_HOME itself may
 # arrive Windows-shaped.
 NDK_HOME="$(cygpath -u "$NDK_HOME" 2>/dev/null || echo "$NDK_HOME")"
+# Gradle passes Windows-shaped dirs; GNU tar reads "C:\..." as a *remote host*
+# ("Cannot connect to C: resolve failed") — normalize everything MSYS2-side.
+OUT_DIR="$(cygpath -u "$OUT_DIR" 2>/dev/null || echo "$OUT_DIR")"
 NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/$NDK_PREBUILT/bin"
 export PATH="$NDK_BIN:$PATH"
 
@@ -47,6 +50,7 @@ export PATH="$NDK_BIN:$PATH"
 # USERLAND_CACHE lets the host keep downloads across `clean`. CI re-fetches
 # per run by design (hermetic).
 CACHE="${PALMCODE_USERLAND_CACHE:-$OUT_DIR/.cache-userland}"
+CACHE="$(cygpath -u "$CACHE" 2>/dev/null || echo "$CACHE")"
 mkdir -p "$CACHE" "$OUT_DIR"
 
 fetch() { # <url> <sha256> <dest>

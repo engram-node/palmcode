@@ -3,9 +3,11 @@
 //! Edit match tiers, in order of preference: exact; indentation-flexible
 //! (per-line content equal after leading whitespace, constant indent delta);
 //! line-trimmed; whitespace-normalized (per line); block-anchor (first/last
-//! line anchors + normalized interior). Note indentation-flexible precedes
-//! line-trimmed: every one of its hits is also a line-trimmed hit, but the
-//! constant-delta constraint is the more precise signal.
+//! line anchors trim-exact + ≥60% interior similarity, unique candidate
+//! required — strictly-best score wins, ties fail). Note indentation-
+//! flexible precedes line-trimmed: every one of its hits is also a
+//! line-trimmed hit, but the constant-delta constraint is the more precise
+//! signal. The landing tier is named in the tool result (`[exact]`, …).
 //!
 //! Line endings (LF/CRLF) and BOM are preserved verbatim.
 
@@ -220,23 +222,7 @@ pub(crate) fn find(text: &str, old: &str) -> (Option<Tier>, Vec<Hit>) {
                 }
                 true
             }),
-            Tier::BlockAnchor => window_hits(text, old, tier, |win, ol| {
-                if win.len() < 2 {
-                    return win[0].trim() == ol[0].trim();
-                }
-                // anchors exact-after-trim; interior whitespace-normalized
-                let first_ok = win[0].trim() == ol[0].trim();
-                let last_ok = win[win.len() - 1].trim() == ol[ol.len() - 1].trim();
-                let interior_ok =
-                    win[1..win.len() - 1]
-                        .iter()
-                        .zip(&ol[1..ol.len() - 1])
-                        .all(|(a, b)| {
-                            a.split_whitespace().collect::<String>()
-                                == b.split_whitespace().collect::<String>()
-                        });
-                first_ok && last_ok && interior_ok
-            }),
+            Tier::BlockAnchor => block_anchor_hits(text, old),
             Tier::Exact => unreachable!(),
         };
         if !hits.is_empty() {
@@ -244,6 +230,59 @@ pub(crate) fn find(text: &str, old: &str) -> (Option<Tier>, Vec<Hit>) {
         }
     }
     (None, Vec::new())
+}
+
+/// Block-anchor tier: first+last lines anchor (trim-exact); the interior
+/// only needs a SIMILARITY — ≥ 60% of the old block's non-blank interior
+/// lines match whitespace-normalized. The match must be UNAMBIGUOUS: one
+/// candidate, or a strictly-best score over all others (ties fail, the
+/// model must supply more context — fuzzy multi-hits guess wrong too
+/// often to be allowed silently).
+fn block_anchor_hits(text: &str, old: &str) -> Vec<Hit> {
+    const THRESHOLD: f64 = 0.6;
+    let starts = line_starts(text);
+    let lines: Vec<&str> = text.lines().collect();
+    let ol = old_lines(old);
+    if ol.is_empty() || lines.len() < ol.len() {
+        return Vec::new();
+    }
+    let norm = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
+    let interior_blank = |i: usize| ol[i].trim().is_empty();
+    let interior_nonblank = (1..ol.len().saturating_sub(1))
+        .filter(|&i| !interior_blank(i))
+        .count();
+
+    let mut scored: Vec<(f64, Hit)> = Vec::new();
+    for i in 0..=lines.len() - ol.len() {
+        let win = &lines[i..i + ol.len()];
+        if win[0].trim() != ol[0].trim() || win[ol.len() - 1].trim() != ol[ol.len() - 1].trim() {
+            continue;
+        }
+        if interior_nonblank == 0 {
+            scored.push((1.0, hit_at(text, &starts, i + 1, i + ol.len())));
+            continue;
+        }
+        let matched = (1..ol.len() - 1)
+            .filter(|&j| !interior_blank(j) && norm(win[j]) == norm(ol[j]))
+            .count();
+        let score = matched as f64 / interior_nonblank as f64;
+        if score >= THRESHOLD {
+            scored.push((score, hit_at(text, &starts, i + 1, i + ol.len())));
+        }
+    }
+    match scored.len() {
+        0 => Vec::new(),
+        1 => scored.into_iter().map(|(_, h)| h).collect(),
+        _ => {
+            // strictly-best wins; any tie at the top = ambiguous → no hit
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            if scored[0].0 > scored[1].0 {
+                vec![scored.into_iter().next().unwrap().1]
+            } else {
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// Closest match: window with the most per-line (trimmed) equality.
@@ -420,11 +459,13 @@ pub fn run_edit(args: &EditArgs, roots: &RootSet, reads: &ReadCache) -> Result<E
     atomic_write(&path, &bytes)?;
     reads.record_read(&path)?;
     Ok(EditOutcome {
+        // tier first: event previews truncate long paths, and the tier must
+        // survive into edit-bench traces
         summary: format!(
-            "edited {}: {} replacement(s) [{}]",
+            "edited [{}] {}: {} replacement(s)",
+            tier_name(tier),
             path.display(),
             replacements,
-            tier_name(tier)
         ),
         tier_used: tier,
         replacements,
@@ -596,6 +637,63 @@ mod tests {
                 .unwrap()
                 .contains("fn g()")
         );
+    }
+
+    #[test]
+    fn golden_block_anchor_fuzzy_unique() {
+        let (_d, roots, reads) = env();
+        setup_file(
+            &roots,
+            &reads,
+            "b.rs",
+            b"fn alpha() {\n    one();\n    two();\n    three();\n    four();\n}\n",
+        );
+        // anchors trim-exact; interior = one/XXX/three/four vs one/two/three/four
+        // → 3/4 matched = 75% ≥ 60% threshold → hit
+        let out = edit(
+            &roots,
+            &reads,
+            "b.rs",
+            "fn alpha() {\n    one();\n    XXX();\n    three();\n    four();\n}",
+            "fn alpha() {\n    changed();\n}",
+        );
+        assert!(out.is_ok(), "3/4=75% interior must hit: {out:?}");
+        assert_eq!(out.unwrap().tier_used, Tier::BlockAnchor);
+    }
+
+    #[test]
+    fn block_anchor_below_threshold_and_ties_fail() {
+        let (_d, roots, reads) = env();
+        setup_file(
+            &roots,
+            &reads,
+            "b2.rs",
+            b"fn alpha() {\n    one();\n    two();\n    three();\n    four();\n}\n",
+        );
+        // interior one/XXX/YYY/four vs one/two/three/four → 2/4 = 50% < 60%
+        let err = edit(
+            &roots,
+            &reads,
+            "b2.rs",
+            "fn alpha() {\n    one();\n    XXX();\n    YYY();\n    four();\n}",
+            "fn alpha() {\n    changed();\n}",
+        );
+        assert!(err.is_err(), "50% interior must not hit");
+        // BOTH candidates above threshold with equal scores → ambiguous, fail
+        setup_file(
+            &roots,
+            &reads,
+            "b3.rs",
+            b"fn a() {\n    keep1();\n    keep2();\n    keep3();\n    z();\n}\nfn a() {\n    keep1();\n    keep2();\n    keep3();\n    z();\n}\n",
+        );
+        let err2 = edit(
+            &roots,
+            &reads,
+            "b3.rs",
+            "fn a() {\n    keep1();\n    keep2();\n    keep3();\n    CHANGED();\n}",
+            "fn a() {\n    replaced();\n}",
+        );
+        assert!(err2.is_err(), "tied block-anchor candidates must fail");
     }
 
     #[test]
