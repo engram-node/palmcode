@@ -1283,7 +1283,10 @@ async fn run_turn(task: TurnTask) {
             total_completion += u.completion_tokens as u64;
             total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
             if let Some(c) = u.cached_tokens {
-                total_cached = Some(total_cached.unwrap_or(0) + c as u64);
+                // keep the LAST call's cached count (not a sum): the final
+                // request carries the whole history, so its ratio is the
+                // honest "prefix cache effectiveness at turn end"
+                total_cached = Some(c as u64);
             }
             // G: calibrate the bytes/token EMA from real usage
             engine.note_usage_sample(
