@@ -19,6 +19,7 @@ per-turn overhead number; M6 publishes the full table.
 | Cold start to interactive | < 1.2 s | **1038 ms** (`am start -W` TotalTime, debug APK; includes core load + SQLite + Keystore decrypt) | motorola edge 50 neo | 2026-10-11 |
 | Cold start (release/R8) | < 1.2 s | **316–463 ms** across 4 runs (`am start -W` TotalTime; first 463, then 331/316/301; sessions + Keystore intact across debug->release install) | motorola edge 50 neo | 2026-10-12 |
 | Cold start (release/R8, M2 w/ tree-sitter .so) | < 1.2 s | **345–537 ms** across 4 runs (537 first, 389/346/345 after; +~35–75 ms vs M1 for the +9 MB raw grammars) | motorola edge 50 neo | 2026-10-13 |
+| Cold start (release/R8, M3 w/ userland APK 11.36 MB) | < 1.2 s | **369-622 ms** across 4 runs (622 first after install, 424/415/369 after) | phone ZD222NNHWP | 2026-10-14 |
 | APK size arm64 (M2) | < 30 MB target | **7.24 MB** release unsigned (M1: 5.14 MB; +2.1 MB compressed = tree-sitter grammars + tool code) | host `assembleRelease` | 2026-10-13 |
 
 ### Release APK composition & the 22/25.7 → 5.1/7.2 MB story (arm64 unsigned, 2026-10-13)
