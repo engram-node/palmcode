@@ -36,8 +36,9 @@ to 5.14 MB. M2 grew it back to 7.24 MB by adding 9 tree-sitter grammars
 | `resources.arsc` | 0.09 MB | 0.09 MB | compiled resources |
 | `lib/arm64-v8a/libjnidispatch.so` | 0.038 MB | 0.162 MB | JNA (SQLite) |
 | licenses/assets/manifest/prof | < 0.05 MB | — | THIRD_PARTY_LICENSES, baseline.prof, etc. |
-| **userland (busybox/rg/git)** | **0 — NOT packaged yet** | — | built + device-verified in M1 spikes; packaging lands with `userland/build.sh` (below) |
-| **Total** | **7.24 MB** | 19.88 MB | hard limit 40 MB → **~32 MB headroom** |
+| **userland arm64 real (2026-10-14)** | **4.21 MB** | 8.91 MB | busybox 604 KB + rg 1 738 KB + git 1 871 KB in-APK — built by `userland/build.sh` (busybox 1.38.0 / rg 15.2.0 / git 2.56.0, checksum-verified, 16 KB LOAD alignment asserted per binary) |
+| **Total (M2, no userland)** | **7.24 MB** | 19.88 MB | — |
+| **Total (M3, with userland, measured `app-arm64-v8a-release-unsigned.apk`)** | **11.36 MB** | 28.8 MB | hard limit 40 MB → **~28.6 MB headroom** |
 
 Userland size forecast (stripped aarch64, from device-verified spike builds):
 git 3.55 MB + ripgrep ~2.7 MB + busybox ~1.1 MB ≈ **+7.4 MB raw → ~+3.5–4 MB

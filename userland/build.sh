@@ -97,7 +97,10 @@ check_align() { # 16 KB page-alignment gate: every LOAD segment at 0x4000
 
 package() { # <built-binary> <abi> <name>
   local bin=$1 abi=$2 name=$3
-  local dest="$OUT_DIR/jniLibs/$abi/lib$name.so"
+  # jniLibs dirs must be AGP ABI names: arm64 -> arm64-v8a ("... is not an ABI")
+  local abi_dir=$abi
+  [ "$abi" = arm64 ] && abi_dir=arm64-v8a
+  local dest="$OUT_DIR/jniLibs/$abi_dir/lib$name.so"
   mkdir -p "$(dirname "$dest")"
   llvm-strip "$bin" -o "$dest"
   check_align "$dest"
