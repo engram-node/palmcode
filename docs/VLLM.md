@@ -127,11 +127,17 @@ M2 notes on the fixture set:
   GLM captures; their in-fixture tool names (`read_file`, …) predate the
   M2 tool rename — the tool-loop tests **rewrite the names in memory at
   replay**; the bytes on disk stay untouched.
-- **No fixture carries `usage`** (Grid ignores `include_usage`; usage
-  arrives only in the final chunk's `usage` when the server adds it, and
-  Grid's tool streams show none). Tests that need usage (`note_usage_
-  sample`, EMA token accounting) build synthetic usage chunks; do not
-  trust real-traffic fixtures for usage-dependent assertions.
+- **No fixture carries `usage`** — all 7 captures are from 2026-10-10, a
+  window in which Grid emitted **no usage frames at all** (each `.sse` ends
+  `finish_reason` → `[DONE]`, nothing after). Since 2026-10-12 every live
+  Grid stream observed (plain **and** tool-call, on device and in
+  edit-bench) ends with a final-chunk `usage` object including
+  `prompt_tokens_details.cached_tokens`; the M2 meters, cache% and the
+  bytes/token EMA all run on it. If Grid ever reverts to the capture-day
+  behavior, metrics silently degrade to estimates (EMA stays at default).
+  Tests that need usage (`note_usage_sample`, EMA accounting) still build
+  synthetic usage chunks — do not trust the fixture set for
+  usage-dependent assertions until it is recaptured.
 
 ## Probe
 
