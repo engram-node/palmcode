@@ -154,9 +154,12 @@ fn starts_with(path: &Path, root: &Path) -> bool {
 /// Strip the Windows `\\?\` verbatim prefix that `canonicalize` adds, so
 /// comparisons and UI see ordinary paths.
 pub fn strip_verbatim(p: &Path) -> PathBuf {
-    let s = p.as_os_str();
     #[cfg(windows)]
-    if let Some(stripped) = s.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+    if let Some(stripped) = p
+        .as_os_str()
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+    {
         return PathBuf::from(stripped);
     }
     p.to_path_buf()
