@@ -97,6 +97,13 @@ val msysBinutils = File("C:\\msys64\\mingw64\\bin")
 
 fun cargoEnvironment(ndkDir: File): Map<String, String> = buildMap {
     put("ANDROID_NDK_HOME", ndkDir.absolutePath)
+    // Reproducibility: assert()/__FILE__ in vendored C (tree-sitter grammars)
+    // would bake absolute build paths into the .so; NDEBUG compiles asserts
+    // out, the prefix-map normalizes anything left. cc-rs splits the env var
+    // on whitespace — the forward-slashed, space-free form is intentional.
+    val ccFlags = "-DNDEBUG -ffile-prefix-map=${coreDir.absolutePath.replace('\\', '/')}=core"
+    put("CFLAGS_aarch64_linux_android", ccFlags)
+    put("CFLAGS_x86_64_linux_android", ccFlags)
     if (isWindows) {
         val front = listOfNotNull(
             msysBinutils.takeIf { it.isDirectory }?.absolutePath,
