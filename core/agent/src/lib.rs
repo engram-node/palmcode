@@ -1255,6 +1255,10 @@ async fn run_turn(task: TurnTask) {
 
     let turn_start = Instant::now();
     let mut cancelled = false;
+    // Harness-overhead probe (VERIFY: item 2): end of a tool-call stream to
+    // dispatch of the follow-up request, per iteration. println! reaches
+    // logcat on Android (mirrors ffi-android_log_error).
+    let mut last_stream_end: Option<Instant> = None;
 
     let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
         iterations += 1;
@@ -1296,6 +1300,12 @@ async fn run_turn(task: TurnTask) {
             tools: schemas.clone(),
         };
 
+        if let Some(t) = last_stream_end {
+            println!(
+                "OVERHEAD turn_gap_ms={} iter={iterations}",
+                t.elapsed().as_millis()
+            );
+        }
         let flow = stream_once(
             engine,
             &session_id,
@@ -1309,6 +1319,7 @@ async fn run_turn(task: TurnTask) {
             },
         )
         .await;
+        last_stream_end = Some(Instant::now());
 
         if first_ttft.is_none() {
             first_ttft = flow.ttft;
