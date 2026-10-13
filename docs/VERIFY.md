@@ -72,6 +72,28 @@ only R8 regression found by probing.
 | APK arm64 release unsigned | **5.14 MB** (was 25.74 MB unshrunk) - composition in BENCHMARKS.md |
 | CI (PR #6) incl. R8 byte-repro | green, both runs |
 
+## M2 device acceptance — motorola edge 50 neo, Android 16, 2026-10-12
+
+Debug APK (post-M2 core: tools, permissions, workspaces, prompt templates,
+tree-sitter checks), driven via adb uiautomator, verified against on-disk
+files (`run-as cat`).
+
+| Check | Result |
+|---|---|
+| SAF workspace import | Download/demo-ws tree imported via system picker to `/data/user/0/dev.palmcode/files/workspaces/demo-ws` (runtime copy of app-dir files as app uid — `run-as cp` to FUSE is SELinux-blocked, so SAF is also the honest user flow) |
+| Workspace survives process death | force-stop → relaunch → `workspace: demo-ws` chip present (registry restore at engine start) |
+| Tools over the wire | first attempt HTTP 400 — litellm requires OpenAI-nested tool objects; fixed in builder (fa0e165). After fix: full loop vs Grid |
+| Multi-file refactor with approvals (beat→pulse, 2 files) | reasoning + 4 tool cards (`read/grep/edit/edit` ✓, 0–7 ms each), approval sheet per edit (Allow once ×2), on-disk result exact: call site + definition renamed, lib.rs untouched |
+| Tool card expand | preview + unified diff (`--- a/…`/`+++ b/…` header + colored lines) rendered from `file_preimages` |
+| Kill mid-tool (`am force-stop` during pending approval) | session → `interrupted`; resume → killed edits appear as ✗ cards and are **never re-run**; model re-read both files, re-issued fresh calls, turn completed; final files: `tick_work()` once, `pulse()` intact, lib.rs updated |
+| FUSE path safety | `/storage/emulated/0/…` roots: `realpath` blocked for app UIDs → RootSet falls back to lexical root (fbf20d8); adb-pushed-and-chowned paths stay unreadable by design |
+| Organic user probe (owner, unscripted) | "hello / hoi / what all you can do" — model answered in BUILD mode with workspace-aware capability list |
+
+Issues found live and fixed same-day: OpenAI tool shape (400), `s`
+unused-binding on linux (CI rust), C-side path embeds breaking byte-repro
+(CI repro), cache ratio >100% from crossing iterations (ae441ea, fix not yet
+on-device), decode_tps <250 ms clamp (host-side, pending device).
+
 ## Verified on physical hardware
 
 Verified via the probe above (identical app, post-rename `dev.palmcode`).
@@ -116,7 +138,11 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
   two checkouts in different dirs, different HOME + GRADLE_USER_HOME,
   RUSTFLAGS --remap-path-prefix active - **DETERMINISTIC, all three APKs
   byte-identical** (arm64-v8a de2fcbba..., universal f21cb8c7...,
-  x86_64 d82ba334...).
+  x86_64 d82ba334...). 2026-10-12 M2 regression hunt: tree-sitter C asserts
+  (`__FILE__`) broke .so determinism across build dirs — fixed via
+  `CFLAGS_*=-DNDEBUG -ffile-prefix-map=<core>=core` in the Gradle cargo env
+  (669dc8f); local A/B .so hashes before DE470787…/8B5CB43E…, after
+  identical 37B4AC1B…; CI green (run 38348300981).
 
 ## Assumed, not yet verified
 
