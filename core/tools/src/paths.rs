@@ -155,11 +155,7 @@ fn starts_with(path: &Path, root: &Path) -> bool {
 /// comparisons and UI see ordinary paths.
 pub fn strip_verbatim(p: &Path) -> PathBuf {
     #[cfg(windows)]
-    if let Some(stripped) = p
-        .as_os_str()
-        .to_str()
-        .and_then(|s| s.strip_prefix(r"\\?\"))
-    {
+    if let Some(stripped) = p.as_os_str().to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         return PathBuf::from(stripped);
     }
     p.to_path_buf()
