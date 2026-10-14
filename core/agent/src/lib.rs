@@ -1256,8 +1256,8 @@ async fn run_turn(task: TurnTask) {
     let turn_start = Instant::now();
     let mut cancelled = false;
     // Harness-overhead probe (VERIFY: item 2): end of a tool-call stream to
-    // dispatch of the follow-up request, per iteration. println! reaches
-    // logcat on Android (mirrors ffi-android_log_error).
+    // dispatch of the follow-up request, per iteration. println! is dropped
+    // on non-debuggable apps (ro.debuggable=0 phones) — logcat via liblog.
     let mut last_stream_end: Option<Instant> = None;
 
     let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
@@ -1301,10 +1301,10 @@ async fn run_turn(task: TurnTask) {
         };
 
         if let Some(t) = last_stream_end {
-            println!(
+            alog(&format!(
                 "OVERHEAD turn_gap_ms={} iter={iterations}",
                 t.elapsed().as_millis()
-            );
+            ));
         }
         let flow = stream_once(
             engine,
@@ -1586,6 +1586,7 @@ async fn execute_calls(
     for (c, out) in calls.iter().zip(outcomes) {
         let (text, is_error, dur, spill) =
             out.unwrap_or_else(|| ("error: internal tool failure".into(), true, 0, None));
+        alog(&format!("TOOL name={} ms={} err={}", c.name, dur, is_error));
         let _ = engine.store.tool_call_finished(
             &c.id,
             !is_error,
@@ -1640,6 +1641,29 @@ fn preview(text: &str) -> String {
         s.push('…');
     }
     s
+}
+
+/// Bench/measurement logging that actually reaches logcat on production
+/// phones: ART routes app stdout only for debuggable apps, so println! is
+/// /dev/null on our release builds. Direct liblog FFI — no subscriber dep.
+#[cfg(target_os = "android")]
+fn alog(msg: &str) {
+    use std::ffi::{c_char, c_int};
+    #[link(name = "log")]
+    unsafe extern "C" {
+        fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
+    }
+    let tag = std::ffi::CString::new("palmcode").unwrap();
+    let text = std::ffi::CString::new(msg).unwrap_or_else(|_| {
+        std::ffi::CString::new("palmcode: message contained NUL").unwrap()
+    });
+    // 4 = INFO
+    unsafe { __android_log_write(4, tag.as_ptr(), text.as_ptr()) };
+}
+
+#[cfg(not(target_os = "android"))]
+fn alog(msg: &str) {
+    println!("{msg}");
 }
 
 /// Ask/deny/resolution for one call. Emits ToolStarted on Allow (execution
