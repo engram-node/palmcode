@@ -7,7 +7,9 @@ per-turn overhead number; M6 publishes the full table.
 |--------|--------|----------|--------|------|
 | Harness overhead per turn (excl. tool exec) | < 50 ms | **p50/p95 0.9 ms** (25 turns, long_prefill fixture ×71 chunks; wall minus mock's own measured stream span — Windows tokio timer slop makes the scripted delay unusable) | host Windows, release build | 2026-10-11 |
 | `read` tool | < 10 ms | — | — | — |
-| `grep`, ~10k-file repo, warm | < 300 ms | — | — | — |
+| `grep`, ~10k-file repo, warm | < 300 ms | **76 ms warm** (regex `handle_request_99[0-9]{2}`); **1001 ms cold** (first query after SAF import + reinstall, literal `handle_request_5000`) | phone ZD222NNHWP, bench10k SAF workspace (10 000 files / 31.4 MiB) | 2026-10-14 |
+| `glob`, ~10k-file repo, warm | same budget as grep | **16 ms** (`**/*.json`) | phone ZD222NNHWP | 2026-10-14 |
+| Harness overhead per tool turn, device | < 50 ms | preliminary 3 samples: 67 / 69 / 28 ms (turn_gap minus tool exec); full 50-turn run interrupted by USB drops ×2 | phone ZD222NNHWP | 2026-10-14 |
 | `bash` spawn | < 30 ms | **~8 ms** (exec-probe, single sample, cold app) | Emulator palmcode34 x86_64 API 34 | 2026-10-10 |
 | Streaming jank @100 tok/s | < 2% janky frames | **0.40%** (13/3263, `dumpsys gfxinfo` after `reset`, 20 s window mid-stream vs `bench serve 100` over `adb reverse`) | motorola edge 50 neo (Android 16) | 2026-10-11 |
 | Streaming jank @100 tok/s (release/R8) | < 2% | **0.00%** (0/7310 frames, 64 s window mid-stream; "Stop" still offered at end of window; stop->mock observed disconnect; R8 baseline-profile build renders ~114 fps avg on 120 Hz panel) | motorola edge 50 neo (Android 16) | 2026-10-12 |
