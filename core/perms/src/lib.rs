@@ -24,6 +24,8 @@ use std::sync::Mutex;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
+pub mod bash;
+
 pub const TOOLS_READ: &[&str] = &["read", "glob", "grep", "ls"];
 pub const TOOLS_WRITE: &[&str] = &["write", "edit", "apply_patch"];
 
