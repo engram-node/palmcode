@@ -1,0 +1,14 @@
+#!/bin/sh
+# Secret scan on staged changes; keep secrets out of history.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Requires gitleaks >= 8.19 on PATH (https://github.com/gitleaks/gitleaks).
+# CI enforces the same config (.gitleaks.toml) on every push/PR; this hook is
+# a local convenience and skips with a warning when gitleaks is missing.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not on PATH - secret scan SKIPPED (CI will enforce)" >&2
+  exit 0
+fi
+if ! gitleaks git --pre-commit --redact --config .gitleaks.toml; then
+  echo "pre-commit: gitleaks found a secret - commit blocked" >&2
+  exit 1
+fi
