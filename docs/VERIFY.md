@@ -122,6 +122,39 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
 2026-10-10: APK installs; greeting renders; exec-through-symlink exit 42,
 ~8 ms spawn. Emulator-only: does not substitute for the physical section.
 
+## M3-A nested-exec spike — emulator `pocket34`, PROVISIONAL (phone rerun pending)
+
+**PROVISIONAL** per repo policy: emulator-only evidence, x86_64 userland
+pushed to `/data/local/tmp/ul` with the deliverable-B applet symlink farm
+(`bin/* -> ../busybox`, 367 applets). Emulator `pocket34` (x86_64, Android 14
+/ API 34, sdk_gphone64_x86_64), 2026-10-22. Reproduce:
+`powershell -File scripts/exec-matrix.ps1 -Serial emulator-5554 -Abi x86_64`
+(phone: `-Abi arm64-v8a`). Rerun on the phone closes these rows.
+
+| case | expected | got | result |
+|---|---|---|---|
+| argv[0] applet dispatch (sh via symlink) | dispatch-ok | dispatch-ok | PASS |
+| busybox --list applet count | > 300 | 367 | PASS |
+| exit code passthrough | 7 | 7 | PASS |
+| signal death exit code (TERM) | 143 | 143 | PASS |
+| 3-deep nested sh -c | deep-ok | deep-ok | PASS |
+| shebang #!/bin/sh | shebang-bin-sh | shebang-bin-sh | PASS |
+| shebang #!/usr/bin/env sh (raw exec) | FAIL expected (no /usr/bin/env) | `./t2.sh: No such file or directory` | PASS |
+| shebang env mitigation (invoke via sh) | shebang-env-sh | shebang-env-sh | PASS |
+| redirect + applet chain (`wc -l < f`) | 2 | 2 | PASS |
+| stdin closed -> immediate EOF | 0, exit 0 | 0 | PASS |
+| rg --version | ripgrep | ripgrep 15.2.0 (PCRE2 off) | PASS |
+| git --version | git version | git version 2.56.0 | PASS |
+| pgid group kill (`kill -TERM -PGID`) reaps grandchildren | s2 empty | kill-exit 0, s2 empty (leader + 2 sleeps dead) | PASS |
+| leader-only kill orphans grandchildren | orphans survive | 2 sleeps orphaned in dead pgid | PASS |
+
+Findings and follow-up decisions: docs/decisions/0014 (`#!/usr/bin/env`
+unfixable -> `sh script` convention in the command catalog; group-kill via
+negative pgid — busybox kill has no `--` separator; orphan sweep on resume).
+In-shell background jobs die with the spawning adb session (mksh job
+control); in-app spawns are unaffected — consistent with the PDEATHSIG
+design, verified live with deliverable E on the phone.
+
 ## Verified on host + CI
 
 - `cargo build/test/clippy --workspace` + `fmt --check` + `cargo deny`:
