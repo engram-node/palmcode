@@ -143,9 +143,11 @@ fn main() {
         std::fs::create_dir_all(d).expect("trace dir");
     }
 
-    let base = std::env::var("PALMCODE_LLM_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8787/v1".into());
+    let base = std::env::var("PALMCODE_LLM_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8787/v1".into());
     let key = std::env::var("PALMCODE_LLM_API_KEY").expect("PALMCODE_LLM_API_KEY (BYOK; env-only)");
-    let model = std::env::var("PALMCODE_LLM_MODEL").expect("PALMCODE_LLM_MODEL (no provider alias is hardcoded)");
+    let model = std::env::var("PALMCODE_LLM_MODEL")
+        .expect("PALMCODE_LLM_MODEL (no provider alias is hardcoded)");
 
     let mut pass = 0usize;
     let mut run = 0usize;
