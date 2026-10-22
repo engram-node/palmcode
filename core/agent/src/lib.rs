@@ -1654,9 +1654,8 @@ fn alog(msg: &str) {
         fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
     }
     let tag = std::ffi::CString::new("palmcode").unwrap();
-    let text = std::ffi::CString::new(msg).unwrap_or_else(|_| {
-        std::ffi::CString::new("palmcode: message contained NUL").unwrap()
-    });
+    let text = std::ffi::CString::new(msg)
+        .unwrap_or_else(|_| std::ffi::CString::new("palmcode: message contained NUL").unwrap());
     // 4 = INFO
     unsafe { __android_log_write(4, tag.as_ptr(), text.as_ptr()) };
 }
