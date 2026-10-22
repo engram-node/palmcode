@@ -52,7 +52,7 @@ fn cfg(base: String) -> ProviderCfg {
     }
 }
 
-/// fixtue with legacy Grid tool names renamed to M2 names
+/// fixtue with legacy gateway tool names renamed to M2 names
 fn fixture(name: &str, renames: &[(&str, &str)]) -> Vec<u8> {
     let mut text: String = std::fs::read_to_string(format!(
         "{}/../llm/fixtures/vllm/{name}",

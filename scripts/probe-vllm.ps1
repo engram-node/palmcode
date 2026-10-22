@@ -11,19 +11,21 @@
 #
 # NB: no $ErrorActionPreference="Stop" (PS5.1 native-stderr footgun).
 param(
-    [string]$BaseUrl = "https://grid.ai.juspay.net/v1",
-    [string]$MainModel = "glm-latest",
-    [string]$FastModel = "glm-5.3-flash",
+    [string]$BaseUrl = $env:PALMCODE_LLM_BASE_URL,
+    [string]$MainModel = $env:PALMCODE_LLM_MODEL,
+    [string]$FastModel = $env:PALMCODE_LLM_FAST_MODEL,
     [int]$FirstTokenTimeoutSec = 120,
     [int]$IdleStallTimeoutSec = 60,
     [int]$ConnectTimeoutSec = 10
 )
+foreach ($n in 'BaseUrl','MainModel','FastModel') {
+    if (-not (Get-Variable $n -ValueOnly)) { throw "set the PALMCODE_LLM_* env var for -$$n (no defaults are hardcoded)" }
+}
 
 Add-Type -AssemblyName System.Net.Http
 try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 } catch {}
 
 $apiKey = $env:PALMCODE_LLM_API_KEY
-if (-not $apiKey) { $apiKey = $env:GLM_API_KEY }
 
 $rows = New-Object System.Collections.Generic.List[string]
 function Add-Row([string]$k, [string]$v) { $rows.Add("| $k | $v |") }

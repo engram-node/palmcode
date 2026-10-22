@@ -44,8 +44,8 @@ actionable fix:
    `max_tokens` (cap), `tools`/`tool_choice` when calling, and
    `chat_template_kwargs` inside `extra_body` **if the user configures them
    per model role** (e.g. `{"enable_thinking": false}` on the fast role).
-2. **Model roles**: `main` (default `glm-latest`) for the agent loop,
-   `fast` (default `glm-5.3-flash`) for snippets/diffs/titles. Both
+2. **Model roles**: `main` (default `main-model`) for the agent loop,
+   `fast` (default `fast-model`) for snippets/diffs/titles. Both
    overridable in settings.
 3. **Reasoning models need headroom.** `max_tokens` < ~512 produces
    `finish_reason: "length"` with empty visible content (all budget burned
@@ -123,17 +123,17 @@ M1 acceptance for the SSE parser:
 
 M2 notes on the fixture set:
 
-- `tool_call` / `parallel_tools` / `tool_result_followup` are real Grid
+- `tool_call` / `parallel_tools` / `tool_result_followup` are real gateway
   GLM captures; their in-fixture tool names (`read_file`, …) predate the
   M2 tool rename — the tool-loop tests **rewrite the names in memory at
   replay**; the bytes on disk stay untouched.
 - **No fixture carries `usage`** — all 7 captures are from 2026-10-10, a
-  window in which Grid emitted **no usage frames at all** (each `.sse` ends
+  window in which gateway emitted **no usage frames at all** (each `.sse` ends
   `finish_reason` → `[DONE]`, nothing after). Since 2026-10-12 every live
-  Grid stream observed (plain **and** tool-call, on device and in
+  gateway stream observed (plain **and** tool-call, on device and in
   edit-bench) ends with a final-chunk `usage` object including
   `prompt_tokens_details.cached_tokens`; the M2 meters, cache% and the
-  bytes/token EMA all run on it. If Grid ever reverts to the capture-day
+  bytes/token EMA all run on it. If gateway ever reverts to the capture-day
   behavior, metrics silently degrade to estimates (EMA stays at default).
   Tests that need usage (`note_usage_sample`, EMA accounting) still build
   synthetic usage chunks — do not trust the fixture set for
@@ -146,7 +146,7 @@ prints a pasteable table (models + max_model_len, tool_choice status +
 remediation, reasoning field name, /tokenize status, usage-stats flavor,
 TTFT/tok-s sample). Run it before filing endpoint bugs.
 
-## Observed behavior — Grid gateway (`https://grid.ai.juspay.net/v1`)
+## Observed behavior — gateway (`https://<gateway-host>/v1`)
 
 Verified end-to-end **from the app on a physical phone** (motorola edge 50
 neo, Android 16, debug build, in-app probe 2026-10-11):

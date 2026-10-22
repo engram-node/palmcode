@@ -1,7 +1,8 @@
 //! Manual real-endpoint tests. Never run in CI: both env vars must be set.
 //! Keys come from the environment only and are never committed.
 //!
-//!   PALMCODE_LLM_API_KEY=sk-... PALMCODE_LLM_BASE_URL=https://host/v1 \
+//!   PALMCODE_LLM_API_KEY=... PALMCODE_LLM_BASE_URL=https://host/v1 \
+//!   PALMCODE_LLM_MODEL=<model> \
 //!       cargo test -p palmcode-llm --test live -- --nocapture
 
 use std::time::Duration;
@@ -11,9 +12,11 @@ use palmcode_llm::client::{Client, ClientConfig, SecretKey, Timeouts};
 use palmcode_llm::types::Message;
 
 fn live_client() -> Option<(Client, String)> {
+    // Endpoint and model come from env only: the repo must stay free of
+    // provider hostnames and model aliases (ADR 0013).
     let key = std::env::var("PALMCODE_LLM_API_KEY").ok()?;
-    let base = std::env::var("PALMCODE_LLM_BASE_URL")
-        .unwrap_or_else(|_| "https://grid.ai.juspay.net/v1".into());
+    let base = std::env::var("PALMCODE_LLM_BASE_URL").ok()?;
+    let model = std::env::var("PALMCODE_LLM_MODEL").ok()?;
     let client = Client::new(ClientConfig {
         base_url: base,
         api_key: SecretKey::new(key),
@@ -21,7 +24,7 @@ fn live_client() -> Option<(Client, String)> {
         continuous_usage: false,
     })
     .ok()?;
-    Some((client, "glm-latest".into()))
+    Some((client, model))
 }
 
 #[tokio::test]

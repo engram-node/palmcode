@@ -3,9 +3,9 @@
 //! the resulting workspace. Approvals are auto-answered "allow once"; the
 //! measured metrics are pass rate + turns + tool-call mix + latency + tokens.
 //!
-//!   GRID_BASE_URL (default: http://127.0.0.1:8787/v1 for a local mock run)
-//!   GRID_API_KEY  (never logged, never persisted)
-//!   GRID_MODEL    (default: glm-latest)
+//!   PALMCODE_LLM_BASE_URL (default: http://127.0.0.1:8787/v1 for a local mock run)
+//!   PALMCODE_LLM_API_KEY  (never logged, never persisted)
+//!   PALMCODE_LLM_MODEL    (required; no provider alias is hardcoded, ADR 0013)
 //!
 //! Run:  cargo run -p palmcode-bench --bin edit-bench --release [--task <id>] [--list]
 
@@ -143,9 +143,9 @@ fn main() {
         std::fs::create_dir_all(d).expect("trace dir");
     }
 
-    let base = std::env::var("GRID_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8787/v1".into());
-    let key = std::env::var("GRID_API_KEY").expect("GRID_API_KEY (BYOK; env-only)");
-    let model = std::env::var("GRID_MODEL").unwrap_or_else(|_| "glm-latest".into());
+    let base = std::env::var("PALMCODE_LLM_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8787/v1".into());
+    let key = std::env::var("PALMCODE_LLM_API_KEY").expect("PALMCODE_LLM_API_KEY (BYOK; env-only)");
+    let model = std::env::var("PALMCODE_LLM_MODEL").expect("PALMCODE_LLM_MODEL (no provider alias is hardcoded)");
 
     let mut pass = 0usize;
     let mut run = 0usize;
