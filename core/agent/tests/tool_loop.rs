@@ -70,6 +70,13 @@ const TOOL_CALL_READ: &[(&str, &str)] = &[("read_file", "read")];
 
 const TOOL_CALL_WRITE: &[(&str, &str)] = &[("read_file", "write")];
 
+/// tool_call fixture rewritten into a bash call: {"command": "echo hi"}
+const TOOL_CALL_BASH: &[(&str, &str)] = &[
+    ("read_file", "bash"),
+    ("{\\\"path\\\": \\\"", "{\\\"command\\\": \\\""),
+    ("src/main.rs", "echo hi"),
+];
+
 const PARALLEL_READS: &[(&str, &str)] = &[("read_file", "read"), ("list_files", "ls")];
 
 #[allow(dead_code)] // server/rt keep the listener alive for the test's scope
@@ -166,6 +173,38 @@ fn read_tool_executes_and_loops_to_answer() {
             })
             .unwrap();
     assert!(text.contains("minimal Rust program"), "{text}");
+}
+
+#[test]
+fn bash_tool_runs_and_streams_output() {
+    let rig = setup(vec![
+        fixture("tool_call.sse", TOOL_CALL_BASH),
+        fixture("tool_result_followup.sse", FOLLOWUP),
+    ]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("keep.txt", "x\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+
+    let sess = engine.create_session("t").unwrap();
+    let mid = engine.send(&sess.id, "run echo hi & tell me").unwrap();
+    wait_for(
+        c,
+        |e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "MessageFinished",
+    );
+
+    assert!(c.has(|e| matches!(
+        e,
+        Event::ToolStarted { name, path, .. } if name == "bash" && path.as_deref() == Some("echo hi")
+    )));
+    assert!(c.has(|e| matches!(e, Event::ToolFinished { ok: true, .. })));
+    // `echo hi` is provably read-only: no approval sheet
+    assert_eq!(c.count(|e| matches!(e, Event::ApprovalRequested { .. })), 0);
+    // live merged stream arrives as batched ToolOutput events
+    assert!(c.has(|e| matches!(
+        e,
+        Event::ToolOutput { chunk, total_bytes, .. } if chunk.contains("hi") && *total_bytes >= 3
+    )));
 }
 
 /// one content chunk + finish with usage + [DONE]

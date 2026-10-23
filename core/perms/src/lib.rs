@@ -150,6 +150,10 @@ pub struct Engine {
     palmcode_dir: GlobSet,
     session_rules: Mutex<Vec<(String, GlobSet)>>, // always-allow (tool, paths)
     accept_edits_session: Mutex<bool>,
+    /// Bash command approvals: exact command strings, never globs (a `*` in
+    /// a command must not broaden the match -- deliverable F).
+    bash_project: std::collections::HashSet<String>,
+    bash_session: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Engine {
@@ -162,8 +166,11 @@ impl Engine {
         trusted: bool,
         db_approvals: &[(String, String)],
     ) -> std::result::Result<Self, String> {
+        // bash command approvals are exact strings, kept out of the glob layers
+        let (bash_db, path_db): (Vec<_>, Vec<_>) =
+            db_approvals.iter().partition(|(t, _)| t == "bash");
         let approvals = {
-            let cfgs: Vec<RuleCfg> = db_approvals
+            let cfgs: Vec<RuleCfg> = path_db
                 .iter()
                 .map(|(t, p)| RuleCfg {
                     tool: t.clone(),
@@ -208,6 +215,8 @@ impl Engine {
             palmcode_dir: palmcode_dir_globset(),
             session_rules: Mutex::new(Vec::new()),
             accept_edits_session: Mutex::new(false),
+            bash_project: bash_db.iter().map(|(_, p)| p.clone()).collect(),
+            bash_session: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -233,6 +242,25 @@ impl Engine {
             .unwrap()
             .push((tool.to_string(), set));
         Ok(())
+    }
+
+    /// Bash commands (deliverable F): exact-match allow cache first, then the
+    /// classifier. Approved commands are matched as literal strings.
+    pub fn decide_bash(&self, command: &str, ctx: &bash::ClassCtx) -> bash::Outcome {
+        if self.bash_session.lock().unwrap().contains(command)
+            || self.bash_project.contains(command)
+        {
+            return bash::Outcome::Allow;
+        }
+        bash::classify(command, ctx)
+    }
+
+    /// Remember an approved bash command for this session (exact string).
+    pub fn allow_bash_for_session(&self, command: &str) {
+        self.bash_session
+            .lock()
+            .unwrap()
+            .insert(command.to_string());
     }
 
     /// The decision for (tool, rel, abs). rel is the workspace-relative path

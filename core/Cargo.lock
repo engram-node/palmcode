@@ -1102,6 +1102,8 @@ name = "palmcode-agent"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "libc",
+ "palmcode-exec",
  "palmcode-llm",
  "palmcode-perms",
  "palmcode-store",
@@ -1200,6 +1202,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "palmcode-exec",
  "serde",
  "serde_json",
  "tempfile",

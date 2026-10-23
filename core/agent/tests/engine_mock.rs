@@ -130,6 +130,7 @@ fn send_stream_finish_persist() {
             | Event::Compacted { seq, .. }
             | Event::ToolStarted { seq, .. }
             | Event::ToolFinished { seq, .. }
+            | Event::ToolOutput { seq, .. }
             | Event::ApprovalRequested { seq, .. }
             | Event::ApprovalResolved { seq, .. }
             | Event::AutoApproveEdits { seq, .. } => *seq,

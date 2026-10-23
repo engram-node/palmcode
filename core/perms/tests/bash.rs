@@ -17,6 +17,39 @@ fn is_deny(c: &str) -> bool {
     matches!(classify(c, &ctx()), Outcome::Deny(_))
 }
 
+#[test]
+fn bash_approvals_are_exact_match_not_globs() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = palmcode_perms::Engine::load(
+        dir.path(),
+        None,
+        false,
+        &[
+            ("bash".to_string(), "rm -rf *".to_string()),
+            ("bash".to_string(), "make build".to_string()),
+        ],
+    )
+    .unwrap();
+    let ctx = ClassCtx::new(dir.path());
+    // DB approvals allow exactly those command strings...
+    assert!(matches!(e.decide_bash("make build", &ctx), Outcome::Allow));
+    assert!(matches!(e.decide_bash("rm -rf *", &ctx), Outcome::Allow));
+    // ...and nothing else, even prefix- or glob-shaped
+    assert!(matches!(e.decide_bash("rm -rf /", &ctx), Outcome::Deny(_))); // abs escape
+    assert!(matches!(e.decide_bash("rm -rf tmp", &ctx), Outcome::Ask(_)));
+    assert!(matches!(
+        e.decide_bash("make build; rm x", &ctx),
+        Outcome::Ask(_)
+    ));
+    // session cache is exact too
+    e.allow_bash_for_session("cargo test");
+    assert!(matches!(e.decide_bash("cargo test", &ctx), Outcome::Allow));
+    assert!(matches!(
+        e.decide_bash("cargo test -- --nocapture", &ctx),
+        Outcome::Ask(_)
+    ));
+}
+
 // --- read-only allowlist -----------------------------------------------------
 
 #[test]

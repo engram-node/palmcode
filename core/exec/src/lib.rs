@@ -11,6 +11,9 @@
 mod host;
 mod native;
 
+pub mod applets;
+
+pub use applets::BUSYBOX_APPLETS;
 pub use host::HostExecutor;
 pub use native::NativeProcExecutor;
 

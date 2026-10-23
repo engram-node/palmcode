@@ -83,9 +83,23 @@ fn env_block(workspace: &Path) -> String {
 /// prefix-cache key.
 fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>, model: &str) -> String {
     match (tools, workspace) {
-        (Some(_), Some(ws)) => format!("{}\n\n{}", build_prompt(model), env_block(ws)),
+        (Some(_), Some(ws)) => format!(
+            "{}\n\n{}\n\n{}",
+            build_prompt(model),
+            command_catalog(),
+            env_block(ws)
+        ),
         _ => SYSTEM_PROMPT.to_string(),
     }
+}
+
+/// Deliverable H: the shipped command catalog (static -> byte-stable; it sits
+/// before the volatile env block so the prompt head stays prefix-cacheable).
+fn command_catalog() -> String {
+    format!(
+        "## Commands (shipped in the sandbox)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first.",
+        palmcode_exec::BUSYBOX_APPLETS.join(" ")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +188,16 @@ pub enum Event {
         duration_ms: u64,
         /// first chars of the result/error for the collapsed card
         preview: String,
+    },
+    /// Batched live output from a bash run (merged stdout+stderr; the UI
+    /// appends to the running tool card).
+    ToolOutput {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        chunk: String,
+        total_bytes: u64,
     },
     /// The model hit an Ask rule; UI shows the sheet and calls
     /// `resolve_approval`. Tool output never triggers this.
@@ -280,6 +304,8 @@ pub(crate) struct ToolsCtx {
     reads: palmcode_tools::ReadCache,
     spill: palmcode_tools::Spiller,
     perms: palmcode_perms::Engine,
+    bash: palmcode_tools::bash::Session,
+    cancel: palmcode_exec::Cancel,
 }
 
 impl ToolsCtx {
@@ -305,6 +331,8 @@ impl ToolsCtx {
             reads: palmcode_tools::ReadCache::new(),
             spill,
             perms,
+            bash: bash_session(workspace_root, spill_root),
+            cancel: palmcode_exec::Cancel::default(),
         })
     }
 }
@@ -323,8 +351,8 @@ struct FrozenCfg {
 pub struct Engine {
     rt: tokio::runtime::Runtime,
     store: Store,
-    /// slot 0 = seq allocator
-    seq: AtomicU64,
+    /// slot 0 = seq allocator (Arc so streaming taps can allocate too)
+    seq: Arc<AtomicU64>,
     inner: Mutex<Inner>,
     inflight: AsyncMutex<HashMap<String, oneshot::Sender<()>>>,
     emitter: Emitter,
@@ -382,7 +410,7 @@ impl Engine {
         let engine = Self {
             rt,
             store,
-            seq: AtomicU64::new(next),
+            seq: Arc::new(AtomicU64::new(next)),
             inner: Mutex::new(Inner {
                 client: None,
                 cfg: None,
@@ -1517,8 +1545,11 @@ async fn execute_calls(
         });
     }
 
+    // bash mutates the workspace: it forces the serial branch so calls in a
+    // batch run strictly in call order.
     let any_write = decided.iter().any(|d| {
-        matches!(d, Decided::Run(a) if palmcode_perms::TOOLS_WRITE.contains(&a.spec.name.as_str()))
+        matches!(d, Decided::Run(a) if palmcode_perms::TOOLS_WRITE.contains(&a.spec.name.as_str())
+            || a.spec.name == "bash")
     });
 
     // Persistence: every call gets a row (pending) before any execution, so a
@@ -1545,7 +1576,8 @@ async fn execute_calls(
                 }
                 Decided::Run(a) => {
                     let ctx = ctx.clone();
-                    set.spawn_blocking(move || (idx, exec_one_owned(a.spec, ctx)));
+                    let tap = bash_tap(engine, session_id, message_id, &a.spec);
+                    set.spawn_blocking(move || (idx, exec_one_owned(a.spec, ctx, tap)));
                 }
             }
         }
@@ -1570,11 +1602,13 @@ async fn execute_calls(
                     }
                     let ctx2 = ctx.clone();
                     let spec = a.spec.clone();
-                    let payload = tokio::task::spawn_blocking(move || exec_one_owned(spec, ctx2))
-                        .await
-                        .unwrap_or_else(|e| {
-                            (format!("error: tool task failed: {e}"), true, 0, None)
-                        });
+                    let tap = bash_tap(engine, session_id, message_id, &spec);
+                    let payload =
+                        tokio::task::spawn_blocking(move || exec_one_owned(spec, ctx2, tap))
+                            .await
+                            .unwrap_or_else(|e| {
+                                (format!("error: tool task failed: {e}"), true, 0, None)
+                            });
                     outcomes[idx] = Some(payload);
                 }
             }
@@ -1611,18 +1645,178 @@ async fn execute_calls(
     results
 }
 
+/// Bash runtime wiring (deliverable B/D): on Android the packaged userland
+/// (busybox + rg + git shipped as jniLibs next to our .so) behind a symlink
+/// farm named by applet; on hosts the platform sh. The env allowlist sets
+/// HOME = workspace root -- the command classifier maps `~` to the same
+/// place (ADR 0015).
+fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bash::Session {
+    let tmpdir = spill_root.join("tmp");
+    let _ = std::fs::create_dir_all(&tmpdir);
+    let mut extra = std::collections::BTreeMap::new();
+    // git trusts exactly this workspace (never safe.directory=*).
+    extra.insert("GIT_CONFIG_COUNT".into(), "1".into());
+    extra.insert("GIT_CONFIG_KEY_0".into(), "safe.directory".into());
+    extra.insert(
+        "GIT_CONFIG_VALUE_0".into(),
+        workspace_root.display().to_string(),
+    );
+    let env = |path: String| palmcode_exec::EnvSpec {
+        path,
+        home: workspace_root.to_path_buf(),
+        tmpdir: tmpdir.clone(),
+        extra: extra.clone(),
+    };
+
+    // Android: libbusybox.so / librg.so / libgit.so live in the native lib
+    // dir (jniLibs packaging). The applet farm is built once in the shared
+    // app-private dir; PATH serves it and nothing else.
+    #[cfg(unix)]
+    if let Some(lib_dir) = self_lib_dir() {
+        let busybox = lib_dir.join("libbusybox.so");
+        if busybox.is_file() {
+            let farm = spill_root
+                .parent()
+                .unwrap_or(spill_root)
+                .join("userland")
+                .join("bin");
+            let _ = std::fs::create_dir_all(&farm);
+            for applet in palmcode_exec::BUSYBOX_APPLETS {
+                symlink_missing(&busybox, &farm.join(applet));
+            }
+            symlink_missing(&lib_dir.join("librg.so"), &farm.join("rg"));
+            symlink_missing(&lib_dir.join("libgit.so"), &farm.join("git"));
+            let path = farm.display().to_string();
+            return palmcode_tools::bash::Session {
+                exec: std::sync::Arc::new(palmcode_exec::NativeProcExecutor::new(
+                    farm.join("sh"),
+                    env(path.clone()),
+                )),
+                cwd: workspace_root.to_path_buf(),
+                env: env(path),
+            };
+        }
+    }
+
+    let exec = std::sync::Arc::new(palmcode_exec::HostExecutor::new());
+    let path = std::env::var("PATH").unwrap_or_default();
+    palmcode_tools::bash::Session {
+        exec,
+        cwd: workspace_root.to_path_buf(),
+        env: env(path),
+    }
+}
+
+/// Directory of this shared library (== the native lib dir on Android).
+#[cfg(unix)]
+fn self_lib_dir() -> Option<PathBuf> {
+    unsafe {
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        let sym = self_lib_dir as *const _ as *const std::ffi::c_void;
+        if libc::dladdr(sym, &mut info) == 0 || info.dli_fname.is_null() {
+            return None;
+        }
+        let path = std::ffi::CStr::from_ptr(info.dli_fname).to_str().ok()?;
+        Some(Path::new(path).parent()?.to_path_buf())
+    }
+}
+
+#[cfg(unix)]
+fn symlink_missing(target: &Path, link: &Path) {
+    if link.symlink_metadata().is_err() {
+        let _ = std::os::unix::fs::symlink(target, link);
+    }
+}
+
+/// Batched live-output tap for one bash call (deliverable D: merged stdout+
+/// stderr streamed as ToolOutput events -- batched, never per-chunk).
+#[derive(Clone)]
+struct BashTap {
+    emitter: Emitter,
+    seq: Arc<AtomicU64>,
+    session_id: String,
+    message_id: i64,
+    call_id: String,
+    buf: Vec<u8>,
+    total: u64,
+    last: Instant,
+}
+
+impl BashTap {
+    fn push(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+        self.total += chunk.len() as u64;
+        if self.buf.len() >= 4096 || self.last.elapsed() >= Duration::from_millis(250) {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let chunk = String::from_utf8_lossy(&self.buf).into_owned();
+        self.buf.clear();
+        self.last = Instant::now();
+        self.emitter.emit(Event::ToolOutput {
+            seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1,
+            session_id: self.session_id.clone(),
+            message_id: self.message_id,
+            call_id: self.call_id.clone(),
+            chunk,
+            total_bytes: self.total,
+        });
+    }
+}
+
+fn bash_tap(
+    engine: &Engine,
+    session_id: &str,
+    message_id: i64,
+    spec: &palmcode_llm::types::ToolCallSpec,
+) -> Option<BashTap> {
+    (spec.name == "bash").then(|| BashTap {
+        emitter: engine.emitter.clone(),
+        seq: engine.seq.clone(),
+        session_id: session_id.to_string(),
+        message_id,
+        call_id: spec.id.clone(),
+        buf: Vec::new(),
+        total: 0,
+        last: Instant::now(),
+    })
+}
+
 /// spawn_blocking-owning variant of the tool dispatch (avoids lifetime soup).
 fn exec_one_owned(
     spec: palmcode_llm::types::ToolCallSpec,
     ctx: Arc<ToolsCtx>,
+    tap: Option<BashTap>,
 ) -> (String, bool, u64, Option<String>) {
     let t = Instant::now();
-    let tctx = palmcode_tools::Ctx {
-        roots: &ctx.roots,
-        reads: &ctx.reads,
-        spill: &ctx.spill,
+    let mut tap = tap;
+    let out = {
+        let mut sink = |chunk: &[u8]| {
+            if let Some(t) = tap.as_mut() {
+                t.push(chunk);
+            }
+        };
+        let bctx = palmcode_tools::bash::BashCtx {
+            session: &ctx.bash,
+            cancel: &ctx.cancel,
+            sink: std::cell::RefCell::new(Some(&mut sink as &mut dyn FnMut(&[u8]))),
+        };
+        let tctx = palmcode_tools::Ctx {
+            roots: &ctx.roots,
+            reads: &ctx.reads,
+            spill: &ctx.spill,
+            bash: Some(&bctx),
+        };
+        palmcode_tools::run_tool(&spec.name, &spec.arguments, &tctx)
     };
-    let out = palmcode_tools::run_tool(&spec.name, &spec.arguments, &tctx);
+    if let Some(t) = tap.as_mut() {
+        t.flush();
+    }
     let dur = t.elapsed().as_millis() as u64;
     match out {
         Ok(capped) => (
@@ -1675,6 +1869,9 @@ async fn check_permission(
     spec: &palmcode_llm::types::ToolCallSpec,
     rel: &str,
 ) -> std::result::Result<(), String> {
+    if spec.name == "bash" {
+        return check_bash_permission(engine, ctx, session_id, message_id, spec).await;
+    }
     let (rel_for_match, abs) = if rel.is_empty() {
         ("<no-path>".to_string(), ctx.workspace_root.clone())
     } else {
@@ -1782,6 +1979,92 @@ async fn check_permission(
             Ok(())
         }
     }
+}
+
+/// Bash calls are classified on their command text (deliverable F), not a
+/// path: Allow runs, Deny carries the reason, Ask opens the approval sheet
+/// (once / session / project) whose caches hold exact command strings.
+async fn check_bash_permission(
+    engine: &Engine,
+    ctx: &Arc<ToolsCtx>,
+    session_id: &str,
+    message_id: i64,
+    spec: &palmcode_llm::types::ToolCallSpec,
+) -> std::result::Result<(), String> {
+    let cmd: String = serde_json::from_str::<serde_json::Value>(&spec.arguments)
+        .ok()
+        .and_then(|v| {
+            v.get("command")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if cmd.is_empty() {
+        return Err("bash: missing command".into());
+    }
+    let label: String = cmd.chars().take(120).collect();
+    let bctx = palmcode_perms::bash::ClassCtx::new(&ctx.workspace_root);
+    let ask_reason = match ctx.perms.decide_bash(&cmd, &bctx) {
+        palmcode_perms::bash::Outcome::Allow => None,
+        palmcode_perms::bash::Outcome::Deny(reason) => {
+            engine.emitter.emit_now(Event::ToolStarted {
+                seq: engine.next_seq(),
+                session_id: session_id.to_string(),
+                message_id,
+                call_id: spec.id.clone(),
+                name: spec.name.clone(),
+                path: Some(label),
+            });
+            return Err(format!("denied: {reason}"));
+        }
+        palmcode_perms::bash::Outcome::Ask(reason) => Some(reason),
+    };
+    if let Some(reason) = ask_reason {
+        let request_id = engine.approval_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let (tx, rx) = oneshot::channel::<(bool, ApprovalScope)>();
+        engine.approvals.lock().unwrap().insert(request_id, tx);
+        engine.emitter.emit_now(Event::ApprovalRequested {
+            seq: engine.next_seq(),
+            session_id: session_id.to_string(),
+            message_id,
+            request_id,
+            tool: spec.name.clone(),
+            path: label.clone(),
+            detail: format!("{reason}: {cmd}").chars().take(300).collect(),
+        });
+        let (approved, scope) = rx.await.unwrap_or((false, ApprovalScope::Once));
+        engine.emitter.emit_now(Event::ApprovalResolved {
+            seq: engine.next_seq(),
+            session_id: session_id.to_string(),
+            request_id,
+            approved,
+        });
+        if !approved {
+            return Err("denied by the user".into());
+        }
+        match scope {
+            ApprovalScope::Once => {}
+            ApprovalScope::Session => ctx.perms.allow_bash_for_session(&cmd),
+            ApprovalScope::Project => {
+                ctx.perms.allow_bash_for_session(&cmd);
+                // persisted keyed by workspace id, never into the repo
+                if let Some(wid) = &ctx.workspace_id {
+                    let _ = engine.store.project_approval_add(wid, "bash", &cmd);
+                }
+            }
+        }
+    }
+    engine.emitter.emit_now(Event::ToolStarted {
+        seq: engine.next_seq(),
+        session_id: session_id.to_string(),
+        message_id,
+        call_id: spec.id.clone(),
+        name: spec.name.clone(),
+        path: Some(label),
+    });
+    Ok(())
 }
 
 /// Capture pre-tool images so the UI can show a diff (deliverable F).

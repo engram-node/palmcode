@@ -158,6 +158,14 @@ pub enum CoreEvent {
         session_id: String,
         dropped_messages: u64,
     },
+    ToolOutput {
+        seq: u64,
+        session_id: String,
+        message_id: i64,
+        call_id: String,
+        chunk: String,
+        total_bytes: u64,
+    },
     ToolStarted {
         seq: u64,
         session_id: String,
@@ -344,6 +352,21 @@ impl EventSink for SinkAdapter {
                     ok,
                     duration_ms,
                     preview,
+                },
+                Event::ToolOutput {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    chunk,
+                    total_bytes,
+                } => CoreEvent::ToolOutput {
+                    seq,
+                    session_id,
+                    message_id,
+                    call_id,
+                    chunk,
+                    total_bytes,
                 },
                 Event::ApprovalRequested {
                     seq,
