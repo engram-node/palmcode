@@ -188,12 +188,39 @@ fn stale_pidfile_sweep_reaps_the_group() {
             || res.signal.is_some()
             || started.elapsed() < Duration::from_secs(5)
     );
-    // The sleep must be gone: the tree kill hit the recorded pid.
+    // The sleep must be gone: the tree kill hit the recorded pid. Only LIVE
+    // members count - a SIGKILLed grandchild briefly stays zombie until init
+    // reaps it, and kill(-pgid, 0) sees zombies as existing. Survivors are
+    // printed with state so CI failure output names the leak.
     #[cfg(unix)]
-    assert!(
-        unsafe { libc::kill(-(pid.unwrap() as i32), 0) } != 0,
-        "group still alive"
-    );
+    {
+        let pgid = pid.unwrap() as i32;
+        let mut alive = Vec::new();
+        for e in std::fs::read_dir("/proc").unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                continue;
+            };
+            // "pid (comm) state ppid pgrp ...": comm may contain spaces and
+            // parens, so split from the last ") ".
+            let Some(rest) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let mut f = rest.1.split_whitespace();
+            let state = f.next().unwrap_or("?");
+            let _ppid = f.next();
+            let pgrp: i32 = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            if pgrp == pgid && !matches!(state, "Z" | "X" | "x") {
+                alive.push(format!("{name} state={state} stat={}", stat.trim()));
+            }
+        }
+        assert!(alive.is_empty(), "group still has live members: {alive:?}");
+    }
 }
 
 #[cfg(unix)]
