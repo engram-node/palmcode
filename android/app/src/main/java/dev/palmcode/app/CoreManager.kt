@@ -57,6 +57,8 @@ class ToolCard(val id: String, val name: String, val path: String?) {
     var ok by mutableStateOf(false)
     var durationMs by mutableStateOf(0L)
     var preview by mutableStateOf("")
+    /** Live merged stdout+stderr of a bash run (capped tail; full text in the spill file). */
+    var liveOutput by mutableStateOf("")
 }
 
 /** A pending approval sheet (engine blocks the call until resolved). */
@@ -162,6 +164,12 @@ object AppState {
                             c.ok = e.ok
                             c.durationMs = e.durationMs.toLong()
                             c.preview = e.preview
+                        }
+                    }
+                    is CoreEvent.ToolOutput -> find(e.sessionId, e.messageId)?.let { m ->
+                        m.tools.firstOrNull { it.id == e.callId }?.let { c ->
+                            // cap the card tail; the full stream is in the spill file
+                            c.liveOutput = (c.liveOutput + e.chunk).takeLast(8192)
                         }
                     }
                     is CoreEvent.ApprovalRequested -> {

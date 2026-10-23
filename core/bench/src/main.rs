@@ -23,8 +23,37 @@ async fn main() {
             let port: u16 = arg(4).and_then(|a| a.parse().ok()).unwrap_or(8787);
             serve_paced(tps, secs, port).await
         }
+        "scripts" => {
+            // scripted tool-call turns over adb reverse: one .sse fixture per
+            // chat request, consumed in order
+            let mut args = std::env::args().skip(2);
+            let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(8787);
+            let scripts = args
+                .map(|f| ChatScript {
+                    body: std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}")),
+                    ..Default::default()
+                })
+                .collect();
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+            let server = serve_on(
+                tokio::net::TcpListener::from_std(listener).expect("tokio listener"),
+                MockConfig {
+                    scripts,
+                    tokenize_status: 403,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("mock server");
+            println!("listening: {}", server.base_url());
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        }
         other => {
-            eprintln!("usage: palmcode-bench [overhead|serve <tps>], got {other}");
+            eprintln!(
+                "usage: palmcode-bench [overhead|serve <tps> <secs> <port>|scripts <port> <file.sse>...], got {other}"
+            );
             std::process::exit(2);
         }
     }

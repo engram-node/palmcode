@@ -124,12 +124,13 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
 
 ## M3-A nested-exec spike — emulator `pocket34`, PROVISIONAL (phone rerun pending)
 
-**PROVISIONAL** per repo policy: emulator-only evidence, x86_64 userland
-pushed to `/data/local/tmp/ul` with the deliverable-B applet symlink farm
-(`bin/* -> ../busybox`, 367 applets). Emulator `pocket34` (x86_64, Android 14
-/ API 34, sdk_gphone64_x86_64), 2026-10-22. Reproduce:
+**CONFIRMED** per repo policy (device evidence required): identical results
+on the emulator and on the phone. Emulator `pocket34` (x86_64, Android 14 /
+API 34, sdk_gphone64_x86_64), 2026-10-22. Phone motorola edge 50 neo
+(arm64-v8a, Android 16, `ZD222NNHWP`), 2026-10-23: **14/14 PASS identical to
+the table below**. Reproduce:
 `powershell -File scripts/exec-matrix.ps1 -Serial emulator-5554 -Abi x86_64`
-(phone: `-Abi arm64-v8a`). Rerun on the phone closes these rows.
+(phone: `-Serial ZD222NNHWP -Abi arm64-v8a`).
 
 | case | expected | got | result |
 |---|---|---|---|
@@ -153,7 +154,13 @@ unfixable -> `sh script` convention in the command catalog; group-kill via
 negative pgid — busybox kill has no `--` separator; orphan sweep on resume).
 In-shell background jobs die with the spawning adb session (mksh job
 control); in-app spawns are unaffected — consistent with the PDEATHSIG
-design, verified live with deliverable E on the phone.
+design, to be verified live with deliverable E.
+
+First phone run flagged a spurious group-kill FAIL: the fixture ps filter
+(`sleep|grandchild`) also matched a Motorola vendor daemon
+(`/vendor/bin/sleep 600`, pgid 2105) - a measurement artifact, not a kill
+failure. Filter tightened to `sleep 45|grandchild`; rerun 14/14 (group kill
+s2 = 0 survivors, leader-only s2 = exactly 2 orphans).
 
 ## Verified on host + CI
 

@@ -1712,7 +1712,10 @@ fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bas
 fn self_lib_dir() -> Option<PathBuf> {
     unsafe {
         let mut info: libc::Dl_info = std::mem::zeroed();
-        let sym = self_lib_dir as *const _ as *const std::ffi::c_void;
+        // fn item -> typed fn ptr -> raw ptr (the direct cast fails E0641
+        // when compiled for aarch64-linux-android)
+        let sym_fn: fn() -> Option<PathBuf> = self_lib_dir;
+        let sym = sym_fn as *const () as *const std::ffi::c_void;
         if libc::dladdr(sym, &mut info) == 0 || info.dli_fname.is_null() {
             return None;
         }
