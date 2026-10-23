@@ -180,6 +180,18 @@ design, verified live with deliverable E on the phone.
   (669dc8f); local A/B .so hashes before DE470787…/8B5CB43E…, after
   identical 37B4AC1B…; CI green (run 38348300981).
 
+## M3-D/F/H bash tool + classifier + catalog - host-verified 2026-10-23, device runs pending
+
+| Check | Result |
+|---|---|
+| bash tool (D) host tests | 5 unit (echo+exit line, exit 7 + spill, 1 s timeout kills tree, live sink, guard errors) + 1 end-to-end tool_loop (classifier -> executor -> batched ToolOutput -> loop back): **PASS** |
+| Command classifier (F) | 12 suites, 70+ adversarial cases (IFS tricks, nested substitutions, heredoc expansion, eval, wrapper bypass): **PASS** |
+| Bash approval caches (F) | exact-match session/project (glob metachars never broaden): **PASS** |
+| Command catalog (H) | 367 busybox applets + rg/git + `sh script` note in the byte-stable prompt prefix (before env block) |
+| Workspace suite | **27 suites / 161 tests green**, `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` clean (MSYS2 sh on host) |
+| Android native farm + NativeProcExecutor (dladdr discovery, 367 applet symlinks, PATH=farm) | **PENDING** - deliverable E device run |
+| Device kill-mid-command orphan check + screen-off 10 min bash run (FGS) | **PENDING** - phone/emulator acceptance |
+
 ## Assumed, not yet verified
 
 - F-Droid build-server acceptance of the layout (`docs/fdroid/` draft; M5).
