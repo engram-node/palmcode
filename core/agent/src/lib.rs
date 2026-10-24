@@ -1669,8 +1669,8 @@ fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bas
     };
 
     // Android: libbusybox.so / librg.so / libgit.so live in the native lib
-    // dir (jniLibs packaging). The applet farm is built once in the shared
-    // app-private dir; PATH serves it and nothing else.
+    // dir (jniLibs packaging). Refresh links when an APK update moves the
+    // native lib dir; PATH serves the app-private farm and nothing else.
     #[cfg(unix)]
     if let Some(lib_dir) = self_lib_dir() {
         let busybox = lib_dir.join("libbusybox.so");
@@ -1682,10 +1682,10 @@ fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bas
                 .join("bin");
             let _ = std::fs::create_dir_all(&farm);
             for applet in palmcode_exec::BUSYBOX_APPLETS {
-                symlink_missing(&busybox, &farm.join(applet));
+                ensure_userland_symlink(&busybox, &farm.join(applet));
             }
-            symlink_missing(&lib_dir.join("librg.so"), &farm.join("rg"));
-            symlink_missing(&lib_dir.join("libgit.so"), &farm.join("git"));
+            ensure_userland_symlink(&lib_dir.join("librg.so"), &farm.join("rg"));
+            ensure_userland_symlink(&lib_dir.join("libgit.so"), &farm.join("git"));
             let path = farm.display().to_string();
             return palmcode_tools::bash::Session {
                 exec: std::sync::Arc::new(palmcode_exec::NativeProcExecutor::new(
@@ -1725,9 +1725,37 @@ fn self_lib_dir() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn symlink_missing(target: &Path, link: &Path) {
-    if link.symlink_metadata().is_err() {
-        let _ = std::os::unix::fs::symlink(target, link);
+fn ensure_userland_symlink(target: &Path, link: &Path) {
+    if let Ok(current) = std::fs::read_link(link) {
+        if current == target {
+            return;
+        }
+        if std::fs::remove_file(link).is_err() {
+            return;
+        }
+    }
+    let _ = std::os::unix::fs::symlink(target, link);
+}
+
+#[cfg(all(test, unix))]
+mod userland_link_tests {
+    #[test]
+    fn refreshes_dangling_links_after_apk_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old-libbusybox.so");
+        let new = dir.path().join("new-libbusybox.so");
+        let link = dir.path().join("sh");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+        super::ensure_userland_symlink(&old, &link);
+        std::fs::remove_file(&old).unwrap();
+
+        super::ensure_userland_symlink(&new, &link);
+        assert_eq!(std::fs::read_link(&link).unwrap(), new);
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
+
+        super::ensure_userland_symlink(&new, &link);
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
     }
 }
 

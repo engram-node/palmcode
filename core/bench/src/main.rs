@@ -35,6 +35,7 @@ async fn main() {
                 })
                 .collect();
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+            listener.set_nonblocking(true).expect("nonblocking");
             let server = serve_on(
                 tokio::net::TcpListener::from_std(listener).expect("tokio listener"),
                 MockConfig {

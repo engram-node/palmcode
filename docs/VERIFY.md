@@ -199,6 +199,57 @@ s2 = 0 survivors, leader-only s2 = exactly 2 orphans).
 | Android native farm + NativeProcExecutor (dladdr discovery, 367 applet symlinks, PATH=farm) | **PENDING** - deliverable E device run |
 | Device kill-mid-command orphan check + screen-off 10 min bash run (FGS) | **PENDING** - phone/emulator acceptance |
 
+## CI repair - 2026-10-24
+
+- PR #7 run 39911955809: Rust fmt, Clippy and tests passed; cargo-deny
+  failed on rustls and rustls-webpki advisories. Both release APK builds
+  succeeded; comparison differed only in BusyBox for both ABIs.
+- Patch releases: rustls 0.23.46, rustls-webpki 0.103.16, Tokio 1.53.3
+  (the current audit also flags Tokio's AsyncFd I/O safety advisory).
+  Cargo.lock checksums and vendored sources refreshed; offline source
+  replacement restored after an interrupted vendor update.
+- Windows host: `cargo fmt --all --check`,
+  `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
+  and `cargo deny check`: PASS. All advisory, ban, license and source gates
+  remain enabled.
+- `cargo test --locked --offline --workspace`: PASS, 161 tests on Windows
+  with MSYS2 sh on PATH.
+- BusyBox: `KCONFIG_NOTIMESTAMP=1` produces an empty AUTOCONF_TIMESTAMP
+  in generated autoconf.h. Two independent builds in different directories
+  produce byte-identical stripped libbusybox.so files for both ABIs;
+  the build's 16 KB LOAD alignment gate passes. SHA-256:
+  arm64-v8a 1210eb96176639fda85a0b82dce5609b0f0f223b70843d29f644d0c04cc360d2;
+  x86_64 94a3731f7823c3e18a5462ebc66f482adc329c008aa7d116685f73b297a53ca4.
+  Full APK byte comparison awaits the next CI run.
+
+## CI repair device verification - motorola edge 50 neo, 2026-10-24
+
+Physical phone, Android 16 (API 36), arm64-v8a. Built debug and minified
+release APKs from the repaired tree. Release was signed locally with the
+debug certificate for installation; distribution release APKs remain unsigned.
+
+| Check | Result |
+|---|---|
+| `assembleDebug assembleRelease` | PASS, both ABIs and universal APKs |
+| Final APK native LOAD alignment | PASS, all 14 libraries across arm64-v8a and x86_64; artifact inspection, x86_64 not run on this phone |
+| Packaged BusyBox reproducibility | Both ABI binaries match the earlier independent A/B builds exactly |
+| Release APK userland on phone (`scripts/exec-matrix.ps1`) | 14/14 PASS: dispatch, 367 applets, exits/signals, nested shells, shebang handling, redirects/EOF, rg/git versions, process-group cleanup |
+| Debug in-app Bash via loopback mock | Allow once -> successful Bash card -> final reply; packaged native farm used |
+| Debug-to-release app update | Initially FAIL: stale farm symlinks retained the previous APK native directory. Repaired target refresh; repeated update and release Bash turn PASS |
+| Unix symlink regression test on phone | `userland_link_tests::refreshes_dangling_links_after_apk_update`: 1/1 PASS, Android test executable cross-compiled from source and run via adb |
+| Minified release cold start x4 | 359 / 368 / 387 / 363 ms; saved mock configuration returns to session list after force-stop |
+| Host checks after device fixes | fmt, Clippy, 161 workspace tests PASS on Windows; Unix regression additionally passed on phone |
+| Release unsigned APK size | arm64-v8a 12,015,044 bytes; x86_64 12,480,175 bytes; universal 22,009,462 bytes |
+
+The scripted bench listener was also fixed to use nonblocking mode before
+conversion to Tokio; its previous blocking mode stalled the initial test.
+The original encrypted provider preferences were backed up only on-device,
+restored byte-for-byte, and the temporary backup removed. The patched debug
+APK is left installed. The local mock server and adb reverse mapping were
+removed after testing. No live-provider HTTPS inference was exercised in
+this run. Full APK reproducibility across independent checkouts remains a
+CI check; local A/B verification covered BusyBox binaries.
+
 ## Assumed, not yet verified
 
 - F-Droid build-server acceptance of the layout (`docs/fdroid/` draft; M5).

@@ -115,6 +115,10 @@ BB_TB=$(fetch "$BUSYBOX_URL" "$BUSYBOX_SHA256" "busybox-$BUSYBOX_VERSION.tar.bz2
 BB_SRC="$CACHE/src/busybox-$BUSYBOX_VERSION"
 extract "$BB_TB" "$BB_SRC" "Makefile"
 
+# BusyBox embeds AUTOCONF_TIMESTAMP in its version banner. Omit the build
+# clock from both the generated config and banner, including cached builds.
+export KCONFIG_NOTIMESTAMP=1
+
 for ABI in $ABIS; do
   T=$(triple_of "$ABI")
   B="$CACHE/build/busybox-$ABI"
