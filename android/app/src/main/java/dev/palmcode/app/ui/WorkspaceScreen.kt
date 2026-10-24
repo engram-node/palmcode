@@ -26,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,9 +41,11 @@ import dev.palmcode.core.workspaceImportDir
 import dev.palmcode.core.workspaceMetrics
 import dev.palmcode.core.workspaceRegister
 import dev.palmcode.core.workspaceRemove
+import dev.palmcode.core.workspaceSetTrusted
 import dev.palmcode.core.workspacesList
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private fun humanSize(bytes: ULong): String {
@@ -66,6 +69,7 @@ fun WorkspaceScreen() {
     var importUri by remember { mutableStateOf<Uri?>(null) }
     var exportUri by remember { mutableStateOf<Uri?>(null) }
     var refreshTick by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
 
     suspend fun refreshSilently() {
         val list = withContext(Dispatchers.IO) { workspacesList() }
@@ -148,6 +152,12 @@ fun WorkspaceScreen() {
                         workspaceRemove(w.id, true)
                         refreshTick++
                     },
+                    onToggleTrust = {
+                        scope.launch(Dispatchers.IO) {
+                            runCatching { workspaceSetTrusted(w.id, !w.trusted) }
+                            withContext(Dispatchers.Main) { refreshTick++ }
+                        }
+                    },
                 )
             }
         }
@@ -194,6 +204,7 @@ private fun WorkspaceRow(
     onOpen: () -> Unit,
     onForget: () -> Unit,
     onDelete: () -> Unit,
+    onToggleTrust: () -> Unit,
 ) {
     var metrics by remember(w.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(w.id) {
@@ -223,6 +234,16 @@ private fun WorkspaceRow(
                 TextButton(onClick = onOpen) { Text(if (active) "Active" else "Open") }
                 TextButton(onClick = onForget) { Text("Forget") }
                 TextButton(onClick = onDelete) { Text("Delete copy") }
+            }
+            Row {
+                // M3 trust: untrusted ignores the repo's .palmcode/config.json;
+                // trusted honors its ask/deny rules (allows are always stripped)
+                val label = if (w.trusted) "trusted ✓ — project ask/deny rules on"
+                else "untrusted — project config ignored"
+                TextButton(onClick = onToggleTrust) {
+                    Text(label, color = if (w.trusted) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline)
+                }
             }
         }
     }

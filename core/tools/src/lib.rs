@@ -4,6 +4,7 @@
 //! Everything goes through [`paths::RootSet`] before touching the
 //! filesystem; tool errors are model-readable and never crash the loop.
 
+pub mod bash;
 pub mod caps;
 pub mod diff;
 pub mod edit;
@@ -27,6 +28,8 @@ pub struct Ctx<'a> {
     pub roots: &'a RootSet,
     pub reads: &'a ReadCache,
     pub spill: &'a Spiller,
+    /// bash runtime (deliverable D); None in contexts without an executor.
+    pub bash: Option<&'a bash::BashCtx<'a>>,
 }
 
 /// Deterministic schema list for the LLM request (byte-stable order:
@@ -40,6 +43,7 @@ pub fn schemas() -> Vec<serde_json::Value> {
         edit::write_schema(),
         edit::edit_schema(),
         patch::schema(),
+        bash::schema(),
     ]
 }
 
@@ -92,6 +96,12 @@ pub fn run_tool(name: &str, args_json: &str, ctx: &Ctx) -> Result<Capped> {
             syntax_note(ctx.roots, &files, &mut capped);
             Ok(capped)
         }
+        "bash" => {
+            let b = ctx
+                .bash
+                .ok_or_else(|| ToolError::Guard("bash is not available in this context".into()))?;
+            bash::run(args_json, b, ctx.spill)
+        }
         other => Err(ToolError::Guard(format!("unknown tool: {other}"))),
     }
 }
@@ -130,6 +140,7 @@ mod tests {
             roots: &roots,
             reads: &reads,
             spill: &spill,
+            bash: None,
         };
         let out = run(
             "write",
@@ -147,6 +158,7 @@ mod tests {
             roots: &roots,
             reads: &reads,
             spill: &spill,
+            bash: None,
         };
         let out = run(
             "write",
@@ -174,6 +186,7 @@ mod tests {
             roots: &roots,
             reads: &reads,
             spill: &spill,
+            bash: None,
         };
         let patch = "*** Begin Patch\n\
                      *** Add File: new.rs\n\
@@ -201,6 +214,7 @@ mod tests {
             roots: &roots,
             reads: &reads,
             spill: &spill,
+            bash: None,
         };
         let out = run(
             "write",

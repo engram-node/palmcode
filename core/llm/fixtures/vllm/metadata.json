@@ -1,9 +1,9 @@
 {
     "captured_at":  "2026-10-10T20:19:12Z",
-    "endpoint":  "https://grid.ai.juspay.net/v1",
+    "endpoint":  "https://<gateway-host>/v1",
     "models":  {
-                   "fast":  "glm-5.3-flash",
-                   "main":  "glm-latest"
+                   "fast":  "<fast-model-alias>",
+                   "main":  "<main-model-alias>"
                },
     "server":  {
                    "version":  "unavailable",
@@ -19,5 +19,6 @@
                   "long_prefill",
                   "error_malformed_tool"
               ],
-    "scrubbed":  true
+    "scrubbed":  true,
+    "note":  "endpoint and model aliases intentionally redacted (ADR 0013)"
 }

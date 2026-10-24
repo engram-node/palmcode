@@ -1,38 +1,38 @@
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" file contains"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" file contains"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" a simple Rust"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" a simple Rust"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" program. Let me report"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" program. Let me report"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" what I found"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" what I found"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"glm-latest","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".","content":"The"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","created":1791663540,"model":"mock-main","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".","content":"The"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" file `src/main.rs` contains"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" file `src/main.rs` contains"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" a minimal Rust program:\n\n```rust\n"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" a minimal Rust program:\n\n```rust\n"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"fn main() {"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":"fn main() {"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" println!(\"hi\"); }\n``"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" println!(\"hi\"); }\n``"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"`\n\nIt defines the `main` function"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":"`\n\nIt defines the `main` function"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":", which is"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":", which is"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" the entry point of"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" the entry point of"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" a Rust program, and prints `"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" a Rust program, and prints `"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":"hi` to the console when"}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":"hi` to the console when"}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{"content":" run."}}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{"content":" run."}}]}
 
-data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"glm-latest","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"id":"chatcmpl-96cb42190126b3b4","object":"chat.completion.chunk","created":1791663540,"model":"mock-main","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
 

@@ -1,0 +1,39 @@
+title = "palmcode secrets policy"
+
+[extend]
+# default rule set plus the custom rules below
+useDefault = true
+
+[[rules]]
+id = "palmcode-byok-key-shape"
+description = "BYOK provider keys (sk-... including dash-containing forms the default OpenAI rule misses)"
+regex = '''(?i)\bsk-[a-z0-9_-]{20,}\b'''
+keywords = ["sk-"]
+
+[[allowlists]]
+description = "known-fake test placeholders (redaction unit tests)"
+regexes = [
+  '''sk-never-log-me-''',
+  '''sk-test-mock-key''',
+]
+
+[[allowlists]]
+description = "untracked build outputs and vendored checksum manifests (never committed / upstream sha256 maps)"
+paths = [
+  '''android[/\\]app[/\\]build[/\\]''',
+  '''core[/\\]target[/\\]''',
+  '''[/\\]gitleaks-bin[/\\]''',
+  '''\.cargo-checksum\.json$''',
+]
+
+[[allowlists]]
+description = "vendored upstream test-data / API-constant files (crypto test keys, p12 fixtures, netlink constants). gitleaks path matches skip files ENTIRELY, so these are file-level exclusions; every other core/vendor/ file is fully scanned. A vendor bump that adds new test data may need an entry here."
+paths = [
+  '''core/vendor/linux-raw-sys/.*/netlink\.rs$''',
+  '''core/vendor/libsqlite3-sys/(sqlite3|sqlcipher)/''',
+  '''core/vendor/openssl/(src/(cipher_ctx|dsa|ec|pkey|pkey_ctx|rsa|symm)\.rs|test/)''',
+  '''core/vendor/ring/src/(aead/poly1305_test\.txt|rsa/keypair\.rs)''',
+  '''core/vendor/(schannel/src/crypt_prov\.rs|security-framework/src/os/macos/encrypt_transform\.rs)''',
+  '''core/vendor/tokio-native-tls/(tests|examples)/identity\.p12''',
+  '''core/vendor/windows-sys[^/]*/src/Windows/Win32/(NetworkManagement/WiFi|Security/Cryptography/Certificates)/mod\.rs$''',
+]

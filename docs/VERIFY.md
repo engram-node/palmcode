@@ -41,9 +41,9 @@ on-device SQLite (`palmcode.db` pull) and the host mock server log.
 | Check | Result |
 |---|---|
 | Cold start (force-stop → `am start -W`) | TotalTime **1038 ms** (< 1.2 s) |
-| Provider probe vs Grid from the phone | models 34 / tokenize 403→heuristic / tool_choice OK / reasoning_content / final-chunk usage / cached_tokens exposed / **TTFT 410 ms, 51 tok/s**; panel + overrides shown |
+| Provider probe vs gateway from the phone | models 34 / tokenize 403→heuristic / tool_choice OK / reasoning_content / final-chunk usage / cached_tokens exposed / **TTFT 410 ms, 51 tok/s**; panel + overrides shown |
 | Keystore key survives app restart | force-stop + relaunch → straight to session list, no re-entry; `logcat -d` grep for key material: **0 hits** |
-| Streaming turn vs Grid | reasoning collapsible + markdown answer + metrics `ttft 2142 ms · 7202.0 tok/s · 83 tok · cache 0%`; events+parts persisted (seq 1–8, coalesced) |
+| Streaming turn vs gateway | reasoning collapsible + markdown answer + metrics `ttft 2142 ms · 7202.0 tok/s · 83 tok · cache 0%`; events+parts persisted (seq 1–8, coalesced) |
 | http:// endpoint over `adb reverse` | cleartext banner in setup (before save) + persistent "http cleartext" chip in chat |
 | Stop mid-stream | UI returned to Send; **mock server printed `client-disconnected observed`** |
 | Jank @100 tok/s (bench mock, 20 s window) | **0.40% janky (13/3263, gfxinfo modern metric)** |
@@ -66,7 +66,7 @@ only R8 regression found by probing.
 | Check | Result |
 |---|---|
 | Cold start x4 (`am start -W`) | **463 / 331 / 316 / 301 ms** |
-| Probe vs Grid (R8 build) | models/tokenize-403->heuristic/tool_choice/reasoning_content/final-chunk usage/cached_tokens all OK; **TTFT 309 ms, 37.8 tok/s** |
+| Probe vs gateway (R8 build) | models/tokenize-403->heuristic/tool_choice/reasoning_content/final-chunk usage/cached_tokens all OK; **TTFT 309 ms, 37.8 tok/s** |
 | Streaming turn @100 tok/s via mock+reverse | streamed 60+ s, jank **0.00% (0/7310 frames)** |
 | Stop mid-stream | mock: `client-disconnected observed` |
 | APK arm64 release unsigned | **5.14 MB** (was 25.74 MB unshrunk) - composition in BENCHMARKS.md |
@@ -82,7 +82,7 @@ files (`run-as cat`).
 |---|---|
 | SAF workspace import | Download/demo-ws tree imported via system picker to `/data/user/0/dev.palmcode/files/workspaces/demo-ws` (runtime copy of app-dir files as app uid — `run-as cp` to FUSE is SELinux-blocked, so SAF is also the honest user flow) |
 | Workspace survives process death | force-stop → relaunch → `workspace: demo-ws` chip present (registry restore at engine start) |
-| Tools over the wire | first attempt HTTP 400 — litellm requires OpenAI-nested tool objects; fixed in builder (fa0e165). After fix: full loop vs Grid |
+| Tools over the wire | first attempt HTTP 400 — litellm requires OpenAI-nested tool objects; fixed in builder (fa0e165). After fix: full loop vs gateway |
 | Multi-file refactor with approvals (beat→pulse, 2 files) | reasoning + 4 tool cards (`read/grep/edit/edit` ✓, 0–7 ms each), approval sheet per edit (Allow once ×2), on-disk result exact: call site + definition renamed, lib.rs untouched |
 | Tool card expand | preview + unified diff (`--- a/…`/`+++ b/…` header + colored lines) rendered from `file_preimages` |
 | Kill mid-tool (`am force-stop` during pending approval) | session → `interrupted`; resume → killed edits appear as ✗ cards and are **never re-run**; model re-read both files, re-issued fresh calls, turn completed; final files: `tick_work()` once, `pulse()` intact, lib.rs updated |
@@ -122,6 +122,46 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
 2026-10-10: APK installs; greeting renders; exec-through-symlink exit 42,
 ~8 ms spawn. Emulator-only: does not substitute for the physical section.
 
+## M3-A nested-exec spike — emulator `pocket34`, PROVISIONAL (phone rerun pending)
+
+**CONFIRMED** per repo policy (device evidence required): identical results
+on the emulator and on the phone. Emulator `pocket34` (x86_64, Android 14 /
+API 34, sdk_gphone64_x86_64), 2026-10-22. Phone motorola edge 50 neo
+(arm64-v8a, Android 16, `ZD222NNHWP`), 2026-10-23: **14/14 PASS identical to
+the table below**. Reproduce:
+`powershell -File scripts/exec-matrix.ps1 -Serial emulator-5554 -Abi x86_64`
+(phone: `-Serial ZD222NNHWP -Abi arm64-v8a`).
+
+| case | expected | got | result |
+|---|---|---|---|
+| argv[0] applet dispatch (sh via symlink) | dispatch-ok | dispatch-ok | PASS |
+| busybox --list applet count | > 300 | 367 | PASS |
+| exit code passthrough | 7 | 7 | PASS |
+| signal death exit code (TERM) | 143 | 143 | PASS |
+| 3-deep nested sh -c | deep-ok | deep-ok | PASS |
+| shebang #!/bin/sh | shebang-bin-sh | shebang-bin-sh | PASS |
+| shebang #!/usr/bin/env sh (raw exec) | FAIL expected (no /usr/bin/env) | `./t2.sh: No such file or directory` | PASS |
+| shebang env mitigation (invoke via sh) | shebang-env-sh | shebang-env-sh | PASS |
+| redirect + applet chain (`wc -l < f`) | 2 | 2 | PASS |
+| stdin closed -> immediate EOF | 0, exit 0 | 0 | PASS |
+| rg --version | ripgrep | ripgrep 15.2.0 (PCRE2 off) | PASS |
+| git --version | git version | git version 2.56.0 | PASS |
+| pgid group kill (`kill -TERM -PGID`) reaps grandchildren | s2 empty | kill-exit 0, s2 empty (leader + 2 sleeps dead) | PASS |
+| leader-only kill orphans grandchildren | orphans survive | 2 sleeps orphaned in dead pgid | PASS |
+
+Findings and follow-up decisions: docs/decisions/0014 (`#!/usr/bin/env`
+unfixable -> `sh script` convention in the command catalog; group-kill via
+negative pgid — busybox kill has no `--` separator; orphan sweep on resume).
+In-shell background jobs die with the spawning adb session (mksh job
+control); in-app spawns are unaffected — consistent with the PDEATHSIG
+design, to be verified live with deliverable E.
+
+First phone run flagged a spurious group-kill FAIL: the fixture ps filter
+(`sleep|grandchild`) also matched a Motorola vendor daemon
+(`/vendor/bin/sleep 600`, pgid 2105) - a measurement artifact, not a kill
+failure. Filter tightened to `sleep 45|grandchild`; rerun 14/14 (group kill
+s2 = 0 survivors, leader-only s2 = exactly 2 orphans).
+
 ## Verified on host + CI
 
 - `cargo build/test/clippy --workspace` + `fmt --check` + `cargo deny`:
@@ -146,6 +186,69 @@ git cycle OK on the same phone (commit `e26be30`, PR #3).
   `CFLAGS_*=-DNDEBUG -ffile-prefix-map=<core>=core` in the Gradle cargo env
   (669dc8f); local A/B .so hashes before DE470787…/8B5CB43E…, after
   identical 37B4AC1B…; CI green (run 38348300981).
+
+## M3-D/F/H bash tool + classifier + catalog - host-verified 2026-10-23, device runs pending
+
+| Check | Result |
+|---|---|
+| bash tool (D) host tests | 5 unit (echo+exit line, exit 7 + spill, 1 s timeout kills tree, live sink, guard errors) + 1 end-to-end tool_loop (classifier -> executor -> batched ToolOutput -> loop back): **PASS** |
+| Command classifier (F) | 12 suites, 70+ adversarial cases (IFS tricks, nested substitutions, heredoc expansion, eval, wrapper bypass): **PASS** |
+| Bash approval caches (F) | exact-match session/project (glob metachars never broaden): **PASS** |
+| Command catalog (H) | 367 busybox applets + rg/git + `sh script` note in the byte-stable prompt prefix (before env block) |
+| Workspace suite | **27 suites / 161 tests green**, `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` clean (MSYS2 sh on host) |
+| Android native farm + NativeProcExecutor (dladdr discovery, 367 applet symlinks, PATH=farm) | **PENDING** - deliverable E device run |
+| Device kill-mid-command orphan check + screen-off 10 min bash run (FGS) | **PENDING** - phone/emulator acceptance |
+
+## CI repair - 2026-10-24
+
+- PR #7 run 39911955809: Rust fmt, Clippy and tests passed; cargo-deny
+  failed on rustls and rustls-webpki advisories. Both release APK builds
+  succeeded; comparison differed only in BusyBox for both ABIs.
+- Patch releases: rustls 0.23.46, rustls-webpki 0.103.16, Tokio 1.53.3
+  (the current audit also flags Tokio's AsyncFd I/O safety advisory).
+  Cargo.lock checksums and vendored sources refreshed; offline source
+  replacement restored after an interrupted vendor update.
+- Windows host: `cargo fmt --all --check`,
+  `cargo clippy --locked --offline --workspace --all-targets -- -D warnings`,
+  and `cargo deny check`: PASS. All advisory, ban, license and source gates
+  remain enabled.
+- `cargo test --locked --offline --workspace`: PASS, 161 tests on Windows
+  with MSYS2 sh on PATH.
+- BusyBox: `KCONFIG_NOTIMESTAMP=1` produces an empty AUTOCONF_TIMESTAMP
+  in generated autoconf.h. Two independent builds in different directories
+  produce byte-identical stripped libbusybox.so files for both ABIs;
+  the build's 16 KB LOAD alignment gate passes. SHA-256:
+  arm64-v8a 1210eb96176639fda85a0b82dce5609b0f0f223b70843d29f644d0c04cc360d2;
+  x86_64 94a3731f7823c3e18a5462ebc66f482adc329c008aa7d116685f73b297a53ca4.
+  Full APK byte comparison awaits the next CI run.
+
+## CI repair device verification - motorola edge 50 neo, 2026-10-24
+
+Physical phone, Android 16 (API 36), arm64-v8a. Built debug and minified
+release APKs from the repaired tree. Release was signed locally with the
+debug certificate for installation; distribution release APKs remain unsigned.
+
+| Check | Result |
+|---|---|
+| `assembleDebug assembleRelease` | PASS, both ABIs and universal APKs |
+| Final APK native LOAD alignment | PASS, all 14 libraries across arm64-v8a and x86_64; artifact inspection, x86_64 not run on this phone |
+| Packaged BusyBox reproducibility | Both ABI binaries match the earlier independent A/B builds exactly |
+| Release APK userland on phone (`scripts/exec-matrix.ps1`) | 14/14 PASS: dispatch, 367 applets, exits/signals, nested shells, shebang handling, redirects/EOF, rg/git versions, process-group cleanup |
+| Debug in-app Bash via loopback mock | Allow once -> successful Bash card -> final reply; packaged native farm used |
+| Debug-to-release app update | Initially FAIL: stale farm symlinks retained the previous APK native directory. Repaired target refresh; repeated update and release Bash turn PASS |
+| Unix symlink regression test on phone | `userland_link_tests::refreshes_dangling_links_after_apk_update`: 1/1 PASS, Android test executable cross-compiled from source and run via adb |
+| Minified release cold start x4 | 359 / 368 / 387 / 363 ms; saved mock configuration returns to session list after force-stop |
+| Host checks after device fixes | fmt, Clippy, 161 workspace tests PASS on Windows; Unix regression additionally passed on phone |
+| Release unsigned APK size | arm64-v8a 12,015,044 bytes; x86_64 12,480,175 bytes; universal 22,009,462 bytes |
+
+The scripted bench listener was also fixed to use nonblocking mode before
+conversion to Tokio; its previous blocking mode stalled the initial test.
+The original encrypted provider preferences were backed up only on-device,
+restored byte-for-byte, and the temporary backup removed. The patched debug
+APK is left installed. The local mock server and adb reverse mapping were
+removed after testing. No live-provider HTTPS inference was exercised in
+this run. Full APK reproducibility across independent checkouts remains a
+CI check; local A/B verification covered BusyBox binaries.
 
 ## Assumed, not yet verified
 

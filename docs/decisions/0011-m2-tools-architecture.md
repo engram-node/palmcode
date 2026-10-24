@@ -67,7 +67,7 @@ DB meta table.
 **System prompt (I).** Byte-stable prefix: [static agent instructions +
 tool definitions (deterministic order) + GLM-family template wrapper] then
 trailing environment block (date, workspace paths, storage status).
-Cache-hit rate validated against Grid cached_tokens per turn, recorded in
+Cache-hit rate validated against gateway cached_tokens per turn, recorded in
 BENCHMARKS.md + VERIFY.md.
 
 **UI (H).** Tool cards keyed by call_id (LazyColumn), collapsible; unified
@@ -77,7 +77,7 @@ clamp < 250 ms.
 
 **edit-bench (K).** `core/bench --mode edits`: 20 tasks under
 `core/bench/edit-tasks/` (intent + workspace snapshot + checker script in
-Rust), run --grid, output markdown table to stdout.
+Rust), run --gateway, output markdown table to stdout.
 
 ## Rejected
 

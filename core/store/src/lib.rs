@@ -77,6 +77,7 @@ pub struct StoredWorkspace {
     pub root_path: String,
     pub created_at: i64,
     pub last_used_at: i64,
+    pub trusted: bool,
 }
 
 pub struct Store {
@@ -146,12 +147,24 @@ CREATE TABLE IF NOT EXISTS file_preimages(
 );
 CREATE INDEX IF NOT EXISTS idx_preimages_call ON file_preimages(call_id);
 -- M2 (E): registered workspaces (SAF-imported copies or dev paths).
+-- M3: trusted — project `.palmcode/config.json` rules apply only when 1,
+-- and even then allow-rules are stripped (see perms::Engine::load).
 CREATE TABLE IF NOT EXISTS workspaces(
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     root_path TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL,
-    last_used_at INTEGER NOT NULL
+    last_used_at INTEGER NOT NULL,
+    trusted INTEGER NOT NULL DEFAULT 0
+);
+-- M3: always-for-project approvals, per workspace (no longer written to
+-- .palmcode/config.json — a hostile repo must not inherit trust via files).
+CREATE TABLE IF NOT EXISTS project_approvals(
+    workspace_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    path_glob TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id, tool, path_glob)
 );
 ";
 
@@ -160,6 +173,22 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Additive, idempotent upgrades for DBs written before a column existed
+/// (no user_version framework yet —_schema drift so far is exactly one
+/// column). New tables ride the `IF NOT EXISTS` batch above instead.
+fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    let has_trusted = conn
+        .prepare("SELECT 1 FROM pragma_table_info('workspaces') WHERE name='trusted'")?
+        .exists([])?;
+    if !has_trusted {
+        conn.execute(
+            "ALTER TABLE workspaces ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -172,6 +201,7 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000u32)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -180,6 +210,7 @@ impl Store {
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -387,7 +418,7 @@ impl Store {
             params![id, name, root_path, now_ms()],
         )?;
         conn.query_row(
-            "SELECT id, name, root_path, created_at, last_used_at FROM workspaces WHERE root_path=?1",
+            "SELECT id, name, root_path, created_at, last_used_at, trusted FROM workspaces WHERE root_path=?1",
             params![root_path],
             |r| {
                 Ok(StoredWorkspace {
@@ -396,6 +427,7 @@ impl Store {
                     root_path: r.get(2)?,
                     created_at: r.get(3)?,
                     last_used_at: r.get(4)?,
+                    trusted: r.get::<_, i64>(5)? != 0,
                 })
             },
         )
@@ -405,7 +437,7 @@ impl Store {
     pub fn workspaces_list(&self) -> Result<Vec<StoredWorkspace>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
-            "SELECT id, name, root_path, created_at, last_used_at FROM workspaces ORDER BY last_used_at DESC",
+            "SELECT id, name, root_path, created_at, last_used_at, trusted FROM workspaces ORDER BY last_used_at DESC",
         )?;
         let rows = st
             .query_map([], |r| {
@@ -415,10 +447,50 @@ impl Store {
                     root_path: r.get(2)?,
                     created_at: r.get(3)?,
                     last_used_at: r.get(4)?,
+                    trusted: r.get::<_, i64>(5)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn workspace_set_trusted(&self, id: &str, trusted: bool) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE workspaces SET trusted=?1 WHERE id=?2",
+            params![trusted as i64, id],
+        )?;
+        Ok(())
+    }
+
+    /// Project-scoped "always" approvals (M3): allow rules only — sessions
+    /// load them as a layer between session grants and project config.
+    pub fn project_approvals_list(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut st =
+            conn.prepare("SELECT tool, path_glob FROM project_approvals WHERE workspace_id=?1")?;
+        let rows = st
+            .query_map(params![workspace_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn project_approval_add(
+        &self,
+        workspace_id: &str,
+        tool: &str,
+        path_glob: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO project_approvals(workspace_id, tool, path_glob, created_at) \
+             VALUES (?1,?2,?3,?4)",
+            params![workspace_id, tool, path_glob, now_ms()],
+        )?;
+        Ok(())
     }
 
     /// Bump last_used for a root (set_workspace). Missing row is not an error.

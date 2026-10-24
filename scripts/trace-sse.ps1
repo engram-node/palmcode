@@ -14,9 +14,9 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/trace-sse.ps1
 param(
     [string]$OutDir = "traces",
-    [string]$BaseUrl = "https://grid.ai.juspay.net/v1",
-    [string]$Model = "glm-latest",
-    [string]$FastModel = "glm-5.3-flash",
+    [string]$BaseUrl = $env:PALMCODE_LLM_BASE_URL,
+    [string]$Model = $env:PALMCODE_LLM_MODEL,
+    [string]$FastModel = $env:PALMCODE_LLM_FAST_MODEL,
     [int]$MaxTokens = 4096,
     [switch]$AllowCommit
 )
@@ -35,8 +35,7 @@ if (-not $ignored -and -not $AllowCommit) {
 
 # --- key from env only
 $apiKey = $env:PALMCODE_LLM_API_KEY
-if (-not $apiKey) { $apiKey = $env:GLM_API_KEY }
-if (-not $apiKey) { throw "set `$env:PALMCODE_LLM_API_KEY (or GLM_API_KEY) first" }
+if (-not $apiKey) { throw "set `$env:PALMCODE_LLM_API_KEY first" }
 
 $readFile = @{
     type     = "function"

@@ -2,6 +2,29 @@
 
 Growing list; entries are added as they are confirmed on hardware.
 
+## Wireless adb (long runs keep killing the USB link)
+
+Two USB disconnects observed on one phone under sustained load (multi-minute
+SAF imports, streaming turns); `adb kill-server` does not bring the device
+back, only a physical re-plug does. Wireless adb removes the cable from the
+path and survives those runs.
+
+Pairing (Android 11+, phone and host on the same Wi-Fi; re-pair after each
+reboot):
+
+1. Phone: Developer options > Wireless debugging > Pair device with pairing
+   code. Note the `IP:port` and the 6-digit code in the dialog (the pairing
+   port is not the connect port).
+2. Host: `adb pair <ip:port> <code>`.
+3. Phone: the main Wireless debugging screen shows a different `IP:port` for
+   connections. Host: `adb connect <ip:port>`.
+4. Verify with `adb devices` (shows `<ip>:<port>  device`).
+
+The pairing survives on the phone until Wireless debugging is toggled off;
+`adb connect` must be repeated after each network/port change. Legacy
+fallback when Wireless debugging is missing: `adb tcpip 5555` over USB once,
+then `adb connect <ip>:5555`.
+
 ## cargo fails compiling `windows-sys`/`getrandom` on Windows (host builds)
 
 Symptoms: "Invalid bfd target" or "dlltool.exe: CreateProcess" from a

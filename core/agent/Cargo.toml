@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+palmcode-exec = { path = "../exec" }
 palmcode-llm = { path = "../llm" }
 palmcode-perms = { path = "../perms" }
 palmcode-store = { path = "../store" }
@@ -20,3 +21,6 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -96,7 +96,12 @@ val gnuSelfContained: File? = File(System.getProperty("user.home"), ".rustup/too
 val msysBinutils = File("C:\\msys64\\mingw64\\bin")
 
 fun cargoEnvironment(ndkDir: File): Map<String, String> = buildMap {
+    // One NDK, everywhere: AGP's ndkVersion, CI's sdkmanager install and
+    // cargo-ndk's env all agree on ndkVersionPin. Set BOTH legacy names so a
+    // stray inherited ANDROID_NDK_ROOT pointing at another NDK cannot split
+    // the toolchain (observed: 27.3 vs 30.0 warning mid-build).
     put("ANDROID_NDK_HOME", ndkDir.absolutePath)
+    put("ANDROID_NDK_ROOT", ndkDir.absolutePath)
     // Reproducibility: assert()/__FILE__ in vendored C (tree-sitter grammars)
     // would bake absolute build paths into the .so; NDEBUG compiles asserts
     // out, the prefix-map normalizes anything left. cc-rs splits the env var
@@ -207,6 +212,33 @@ val execProbeTasks = abiTriples.map { (abi, triple) ->
     }
 }
 
+// ---------------------------------------------------------------------------
+// Userland (busybox/rg/git) from checksum-verified source — userland/build.sh.
+// Lands in build/userland/jniLibs/<abi>/lib{name}.so next to libexecprobe.so.
+// ---------------------------------------------------------------------------
+
+val userlandBuild = tasks.register<Exec>("userlandBuild") {
+    group = "build"
+    description = "Cross-build busybox/ripgrep/git from source (needs bash+make; MSYS2 on Windows, system tools on Linux CI)"
+    val outDir = layout.buildDirectory.dir("userland")
+    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"))
+    outputs.dir(outDir)
+    outputs.cacheIf { true }
+    environment("NDK_HOME", ndkDir.absolutePath)
+    environment("OUT_DIR", outDir.get().asFile.absolutePath)
+    // MSYS2 bash on Windows (proven path for the kbuild/autoconf host steps);
+    // MUST be a login shell: non-login MSYS2 lacks /tmp, /usr/bin on PATH and
+    // working `ln -s` (all three observed failing under direct gradle spawn).
+    executable = if (isWindows) "C:\\msys64\\usr\\bin\\bash.exe" else "bash"
+    if (isWindows) {
+        val scriptPosix = rootProject.file("userland/build.sh").absolutePath
+            .replace('\\', '/').replace(Regex("^([A-Za-z]):"), "/$1").lowercase()
+        args("-lc", "\"$scriptPosix\"")
+    } else {
+        args(rootProject.file("userland/build.sh").absolutePath)
+    }
+}
+
 // License texts (Apache-2.0 obligation stack, GPL source offer) ship as
 // assets; the app shows them from the home screen.
 val copyLicenseAssets = tasks.register<Copy>("copyLicenseAssets") {
@@ -219,6 +251,7 @@ tasks.named("preBuild") {
     dependsOn(cargoNdkRelease)
     dependsOn(uniffiBindgen)
     dependsOn(execProbeTasks)
+    dependsOn(userlandBuild)
     dependsOn(copyLicenseAssets)
 }
 

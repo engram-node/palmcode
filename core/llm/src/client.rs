@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn cleartext_matrix() {
         assert_eq!(
-            cleartext_policy("https://grid.ai.juspay.net/v1"),
+            cleartext_policy("https://llm.example.invalid/v1"),
             Cleartext::Tls
         );
         assert_eq!(

@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn default_request_sends_no_sampling_params() {
         let req = ChatRequest {
-            model: "glm-latest".into(),
+            model: "test-model".into(),
             messages: vec![Message::system("s"), Message::user("u")],
             max_tokens: 4096,
             continuous_usage: false,

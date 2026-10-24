@@ -19,6 +19,10 @@ Agent-facing project notes. Humans: read `README.md`.
   emulator or device; keep `docs/VERIFY.md` accurate.
 - **Record non-obvious decisions in `docs/decisions/`** including rejected
   alternatives.
+- **No secrets, provider hostnames, or model aliases in the tree.** Endpoint,
+  key and model come from `PALMCODE_LLM_*` env vars only (ADR 0013); gitleaks
+  runs in CI and locally via `git config core.hooksPath .githooks`. Never put
+  key material in summaries, docs, ADRs or logs.
 
 ## Build & test
 

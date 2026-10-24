@@ -10,7 +10,7 @@ Latest stable at pin time, verified against primary sources:
 | Android Gradle Plugin | 9.4.0 | developer.android.com (2026-10-01) |
 | Gradle | 9.7.1 | gradle.org (2026-08-19) |
 | Kotlin (compose compiler plugin) | 2.4.21 | kotlinlang.org (2026-10-08) |
-| Android NDK | 30.0.16248370 (r30 LTS) | developer.android.com/ndk (2026-09-08) |
+| Android NDK | 30.0.16248370 (r30 LTS) | developer.android.com/ndk (2026-09-08). Single pin: `ndkVersionPin` in `android/app/build.gradle.kts`; CI sdkmanager installs the same; cargo env sets both `ANDROID_NDK_HOME` and `ANDROID_NDK_ROOT` to it |
 | compileSdk / targetSdk / minSdk | 36 / 36 / 29 | Android 16 stable |
 | Compose BOM | 2026.09.00 | mvnrepository (2026-09-09) |
 | UniFFI | 0.32.2 | crates.io (2026-09-23) |
