@@ -18,18 +18,15 @@ pub enum Outcome {
     Deny(String),
 }
 
-/// Paths a script may mention absolutely: the workspace plus scratch space.
-/// (/dev/null-style literals are handled separately.)
+/// Workspace used by the file tools' canonical path policy.
 pub struct ClassCtx {
     pub workspace: PathBuf,
-    pub extra_roots: Vec<PathBuf>,
 }
 
 impl ClassCtx {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
-            extra_roots: Vec::new(),
         }
     }
 }
@@ -726,6 +723,9 @@ fn check_write_target(target: &str, ctx: &ClassCtx) -> Outcome {
     if t.is_empty() || is_dev_null(t) {
         return Outcome::Allow;
     }
+    if t.contains(['~', '$', '`']) {
+        return Outcome::Ask("path contains shell expansion syntax".into());
+    }
     match resolve(t, ctx) {
         Some(p) => {
             if p.starts_with(&ctx.workspace) {
@@ -744,25 +744,51 @@ fn check_write_target(target: &str, ctx: &ClassCtx) -> Outcome {
 
 fn check_read_target(target: &str, ctx: &ClassCtx) -> Outcome {
     let t = target.trim();
-    if t.is_empty() || is_dev_null(t) || t.starts_with('-') {
-        return Outcome::Allow; // flags are not paths
-    }
-    // only path-looking literals are containment-checked
-    let pathish = t.starts_with('/') || t.starts_with('~') || t.split('/').any(|s| s == "..");
-    if !pathish {
+    let t = if t.starts_with('-') {
+        match t.split_once('=') {
+            Some((_, value)) => value,
+            None => return Outcome::Allow,
+        }
+    } else {
+        t
+    };
+    if t.is_empty() {
         return Outcome::Allow;
     }
-    match resolve(t, ctx) {
-        Some(p)
-            if p.starts_with(&ctx.workspace)
-                || ctx.extra_roots.iter().any(|r| p.starts_with(r)) =>
-        {
-            Outcome::Allow
-        }
-        _ => Outcome::Deny(format!("outside the workspace: {t}")),
+    if t == ":" {
+        return Outcome::Allow; // single-character text delimiter
+    }
+    if t.contains("://") {
+        return Outcome::Ask("URL operand requires approval".into());
+    }
+    if t.contains(['~', '$', '`']) {
+        return Outcome::Ask("path contains shell expansion syntax".into());
+    }
+    // Use precisely the same canonical existing-prefix resolution as file tools.
+    let roots = match palmcode_tools::RootSet::new([ctx.workspace.clone()]) {
+        Ok(roots) => roots,
+        Err(_) => return Outcome::Ask("workspace paths unavailable".into()),
+    };
+    let resolved = match roots.resolve(t, None) {
+        Ok(path) => path,
+        Err(_) => return Outcome::Deny(format!("outside the workspace: {t}")),
+    };
+    let secret = |path: &Path| {
+        path.components().any(|c| {
+            let name = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+            name.starts_with(".env")
+                || name.ends_with(".pem")
+                || name.starts_with("id_rsa")
+                || name.ends_with(".key")
+                || name.starts_with("credentials")
+        })
+    };
+    if secret(Path::new(t)) || secret(&resolved) {
+        Outcome::Ask(format!("secret-file read: {t}"))
+    } else {
+        Outcome::Allow
     }
 }
-
 fn is_dev_null(t: &str) -> bool {
     matches!(
         t,
@@ -770,37 +796,10 @@ fn is_dev_null(t: &str) -> bool {
     )
 }
 
-/// Lexical resolution (no filesystem access): workspace-relative joins, `~`
-/// maps to the workspace home (the bash tool sets HOME = workspace root).
-/// `None` = not statically resolvable (`~user` = someone else's home).
+/// Canonical containment shared with file tools; no scratch-root exceptions.
 fn resolve(t: &str, ctx: &ClassCtx) -> Option<PathBuf> {
-    let expanded: PathBuf = if let Some(rest) = t.strip_prefix("~/") {
-        ctx.workspace.join(rest)
-    } else if t == "~" {
-        ctx.workspace.clone()
-    } else if t.starts_with('~') {
-        return None; // ~user: another user's home directory
-    } else if t.starts_with('/') {
-        PathBuf::from(t)
-    } else {
-        ctx.workspace.join(t)
-    };
-    Some(normalize(&expanded))
-}
-
-fn normalize(p: &Path) -> PathBuf {
-    use std::path::Component::*;
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            ParentDir => {
-                out.pop();
-            }
-            CurDir => {}
-            Normal(s) => out.push(s),
-            RootDir => out.push("/"),
-            Prefix(pr) => out.push(pr.as_os_str()),
-        }
-    }
-    out
+    palmcode_tools::RootSet::new([ctx.workspace.clone()])
+        .ok()?
+        .resolve(t, None)
+        .ok()
 }

@@ -4,7 +4,8 @@
 use palmcode_perms::bash::{ClassCtx, Outcome, classify};
 
 fn ctx() -> ClassCtx {
-    ClassCtx::new("/data/project")
+    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    ClassCtx::new(ROOT.get_or_init(|| tempfile::tempdir().unwrap()).path())
 }
 
 fn is_allow(c: &str) -> bool {
@@ -202,8 +203,6 @@ fn outside_workspace_denies() {
         "echo /etc/passwd",
         "cat ../../etc/passwd",
         "cd ../..",
-        "cat ~/../etc/passwd",
-        "cat ~root/.bashrc",
         "rm -rf /",
         "cat /data/other-project/x",
         "sh -c 'cat /etc/passwd'",
@@ -366,4 +365,73 @@ fn generated_dangerous_arguments_never_allow() {
             assert!(!is_allow(&script), "must not Allow: {script:?}");
         }
     }
+}
+
+#[test]
+fn canonical_paths_secrets_flag_values_and_literal_expansions() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ClassCtx::new(dir.path());
+    for secret in [
+        ".env",
+        ".envrc",
+        ".env.local",
+        "a.pem",
+        "id_rsa.pub",
+        "a.key",
+        "credentials.json",
+    ] {
+        for command in [format!("cat {secret}"), format!("rg --file={secret}")] {
+            assert!(
+                matches!(classify(&command, &ctx), Outcome::Ask(_)),
+                "{command}"
+            );
+        }
+    }
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().to_string_lossy().replace('\\', "/");
+    for command in [
+        format!("cat {outside}/file"),
+        format!("rg --file={outside}/file"),
+    ] {
+        assert!(
+            matches!(classify(&command, &ctx), Outcome::Deny(_)),
+            "{command}"
+        );
+    }
+    for value in ["~/file", "$FILE", "`pwd`", "$(pwd)"] {
+        assert!(matches!(
+            classify(&format!("cat '{value}'"), &ctx),
+            Outcome::Ask(_)
+        ));
+        assert!(matches!(
+            classify(&format!("rg '--file={value}'"), &ctx),
+            Outcome::Ask(_)
+        ));
+    }
+    assert!(matches!(
+        classify("cat nested/new/file", &ctx),
+        Outcome::Allow
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_operands_and_flag_values_cannot_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+    let ctx = ClassCtx::new(dir.path());
+    for command in [
+        "cat escape/file",
+        "rg --file=escape/file",
+        "echo x > escape/file",
+    ] {
+        assert!(
+            matches!(classify(command, &ctx), Outcome::Deny(_)),
+            "{command}"
+        );
+    }
+    std::fs::write(dir.path().join(".env"), "fixture").unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".env"), dir.path().join("alias")).unwrap();
+    assert!(matches!(classify("cat alias", &ctx), Outcome::Ask(_)));
 }

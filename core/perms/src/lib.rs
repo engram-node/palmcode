@@ -109,7 +109,13 @@ impl Layer {
 /// Secret-like basenames: reading them ships secrets to the provider.
 fn secret_globset() -> GlobSet {
     let mut b = GlobSetBuilder::new();
-    for g in ["**/.env", "**/.env.*", "**/*.pem", "**/id_rsa*", "**/*.key"] {
+    for g in [
+        "**/.env*",
+        "**/*.pem",
+        "**/id_rsa*",
+        "**/*.key",
+        "**/credentials*",
+    ] {
         b.add(Glob::new(g).unwrap());
     }
     b.build().unwrap()
