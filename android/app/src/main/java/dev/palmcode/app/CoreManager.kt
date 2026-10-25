@@ -215,6 +215,16 @@ object CoreManager {
     private lateinit var appContext: Context
     private val runs = RunTracker()
     val activeRuns: Set<String> get() = runs.active
+    var appVisible = false
+        private set
+
+    fun setAppVisible(visible: Boolean) {
+        appVisible = visible
+        for (approval in AppState.approvals) {
+            if (visible) ApprovalNotifications.cancel(appContext, approval.requestId)
+            else ApprovalNotifications.post(appContext, approval)
+        }
+    }
 
     fun stopActiveRuns() {
         activeRuns.toList().forEach { stop(it) }
@@ -244,6 +254,11 @@ object CoreManager {
                         is CoreEvent.MessageFinished -> finishRun(event.sessionId)
                         is CoreEvent.Interrupted -> finishRun(event.sessionId)
                         is CoreEvent.TurnError -> finishRun(event.sessionId)
+                        is CoreEvent.ApprovalRequested -> if (!appVisible) {
+                            AppState.approvals.firstOrNull { it.requestId == event.requestId }
+                                ?.let { ApprovalNotifications.post(appContext, it) }
+                        }
+                        is CoreEvent.ApprovalResolved -> ApprovalNotifications.cancel(appContext, event.requestId)
                         else -> {}
                     }
                 }
@@ -259,6 +274,7 @@ object CoreManager {
     fun ensureStarted(context: Context) {
         if (started) return
         appContext = context.applicationContext
+        ApprovalNotifications.clearStale(appContext)
         check(PalmcodeCore.nativeInitAndroid(context) == 0) { "native TLS init failed" }
         coreStart(File(context.filesDir, "palmcode.db").absolutePath, listener)
         store = ProviderStore(context.applicationContext)
@@ -328,6 +344,7 @@ object CoreManager {
     /** scope: "once" | "session" | "project" */
     fun resolveApproval(requestId: ULong, approved: Boolean, scope: String) {
         approvalResolve(requestId, approved, scope)
+        ApprovalNotifications.cancel(appContext, requestId)
         AppState.approvals.removeAll { it.requestId == requestId }
     }
 

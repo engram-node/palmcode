@@ -23,6 +23,7 @@
         android:supportsRtl="true">
         <service android:name=".RunService" android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <receiver android:name=".ApprovalReceiver" android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

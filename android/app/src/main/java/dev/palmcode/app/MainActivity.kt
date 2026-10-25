@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
         if (CoreManager.store.configured && CoreManager.configureFromStore()) {
             AppState.screen = Screen.Sessions
             CoreManager.refreshSessions()
+            openNotificationSession(intent)
         }
         setContent {
             PalmcodeTheme(
@@ -77,5 +78,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        CoreManager.setAppVisible(true)
+    }
+
+    override fun onStop() {
+        CoreManager.setAppVisible(false)
+        super.onStop()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openNotificationSession(intent)
+    }
+
+    private fun openNotificationSession(intent: Intent) {
+        val session = intent.getStringExtra(ApprovalNotifications.SESSION) ?: return
+        if (AppState.sessions.any { it.id == session }) CoreManager.openChat(session)
     }
 }

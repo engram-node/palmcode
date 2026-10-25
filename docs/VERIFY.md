@@ -353,3 +353,13 @@ CI check; local A/B verification covered BusyBox binaries.
 - DONE: both RunTracker JVM tests pass (overlapping turns, duplicate/terminal
   events, failed-start retry and immutable snapshots). JUnit and Hamcrest
   checksum pins were added to Gradle dependency verification metadata.
+
+## Stage 2 notification approvals (2026-10-25)
+
+- DONE: high-importance background notifications offer Approve once,
+  Always for session and Deny using the existing permission protocol.
+- DONE: two protocol regressions test all actions, malformed inputs,
+  request/session mismatch and stale process nonces; Android build and
+  all four JVM unit tests pass. The receiver is non-exported.
+- PENDING: actual delivery, session navigation, action dispatch and denied
+  notification permission behavior on device remain maintainer checks.
