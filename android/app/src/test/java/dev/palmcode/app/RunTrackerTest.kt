@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RunTrackerTest {
+    @Test fun stopDuringSubmissionIsRetainedUntilTheTurnTerminates() {
+        val runs = RunTracker()
+        runs.begin("one")
+        runs.requestStop("one")
+        assertTrue(runs.stopRequested("one"))
+        assertEquals(setOf("one"), runs.active)
+        runs.finish("one")
+        assertFalse(runs.stopRequested("one"))
+        runs.begin("one")
+        assertFalse(runs.stopRequested("one"))
+    }
+
     @Test fun overlappingRunsKeepTheServiceActiveUntilTheLastTerminalEvent() {
         val runs = RunTracker()
         assertTrue(runs.begin("one"))

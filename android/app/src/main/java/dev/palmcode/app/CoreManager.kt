@@ -28,6 +28,11 @@ import dev.palmcode.core.workspaceClear
 import dev.palmcode.core.workspaceCurrent
 import dev.palmcode.core.workspaceSet
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface Screen {
     data object Setup : Screen
@@ -215,6 +220,7 @@ object CoreManager {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var appContext: Context
     private val runs = RunTracker()
+    private val runScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val activeRuns: Set<String> get() = runs.active
     var appVisible = false
         private set
@@ -317,18 +323,24 @@ object CoreManager {
         AppState.screen = Screen.Chat(sessionId)
     }
 
-    fun send(sessionId: String, text: String): Result<Unit> = runCatching {
+    private fun submit(sessionId: String, operation: () -> Unit): Result<Unit> = runCatching<Unit> {
         beginRun(sessionId)
-        try {
-            messageSend(sessionId, text)
-        } catch (e: Exception) {
-            finishRun(sessionId)
-            throw e
+        runScope.launch {
+            try {
+                withContext(Dispatchers.IO) { operation() }
+                if (runs.stopRequested(sessionId)) turnStop(sessionId)
+            } catch (_: Exception) {
+                turnStop(sessionId)
+                finishRun(sessionId)
+                android.widget.Toast.makeText(appContext, "Could not start the turn. Please retry.", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
-        Unit
     }
 
+    fun send(sessionId: String, text: String): Result<Unit> = submit(sessionId) { messageSend(sessionId, text) }
+
     fun stop(sessionId: String) {
+        runs.requestStop(sessionId)
         turnStop(sessionId)
         AppState.unattendedBash.remove(sessionId)
     }
@@ -337,15 +349,7 @@ object CoreManager {
         AppState.unattendedBash[sessionId] = dev.palmcode.core.sessionSetUnattendedBash(sessionId, on)
     }
 
-    fun resumeChat(sessionId: String) {
-        beginRun(sessionId)
-        try {
-            turnResume(sessionId)
-        } catch (e: Exception) {
-            finishRun(sessionId)
-            throw e
-        }
-    }
+    fun resumeChat(sessionId: String) = submit(sessionId) { turnResume(sessionId) }
 
     // ---- M2: approvals + workspace ----
 

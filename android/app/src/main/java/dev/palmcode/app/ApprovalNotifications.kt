@@ -19,8 +19,11 @@ object ApprovalNotifications {
 
     fun clearStale(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.activeNotifications.filter { it.notification.channelId == CHANNEL }
-            .forEach { manager.cancel(it.tag, it.id) }
+        for (notification in manager.getActiveNotifications()) {
+            if (notification.getNotification().getChannelId() == CHANNEL) {
+                manager.cancel(notification.getTag(), notification.getId())
+            }
+        }
     }
 
     fun cancel(context: Context, id: ULong) {
