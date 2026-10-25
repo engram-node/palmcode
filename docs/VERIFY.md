@@ -256,3 +256,9 @@ CI check; local A/B verification covered BusyBox binaries.
 - Phantom-process limits on Android 12+ (docs/TROUBLESHOOTING.md), M3.
 - External-storage performance delta; measurement M5.
 - busybox / ripgrep cross-builds (M3; sizes in ADR 0008 are estimates).
+
+| Device check | Status | Exact steps |
+| --- | --- | --- |
+| Screen off during bash | PENDING | On device, approve and run `sleep 900; printf 'screen-off-complete\n'`. Turn the screen off immediately, leave it off for 10 minutes, then unlock. Wait for completion at 15 minutes. Verify the completion marker appears once, output remains responsive, and the run finishes successfully. |
+| Kill-mid-command orphan sweep | PENDING | On device, approve and run `sleep 300 & wait`. Before killing the app, use `adb shell ps -A -o PID,PPID,ARGS` to record the shell and sleep PIDs. Kill the app process with `adb shell run-as <application-id> kill -9 <app-pid>`, relaunch it, and run the same ps command. Verify both recorded child PIDs are absent after startup sweep. Repeat with `setsid sh -c 'sleep 300' & wait`. |
+| Userland farm failure | PENDING | On a debuggable device build, use `adb shell run-as <application-id>` to remove one entry from the app-private `userland/bin` farm and replace its path with a directory. Start a bash call. Verify a clear `userland unavailable` error and no command execution. Remove the obstructing directory, restart, and verify the farm is recreated using the current packaged libraries. Repeat after an app upgrade with a stale symlink and verify it is replaced. |
