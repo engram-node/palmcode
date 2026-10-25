@@ -87,11 +87,44 @@ impl EnvSpec {
         m.insert("TERM".into(), "dumb".into());
         m.insert("TMPDIR".into(), self.tmpdir.to_string_lossy().into_owned());
         for (k, v) in &self.extra {
-            m.insert(k.clone(), v.clone());
+            if !k.starts_with("PALMCODE_LLM_") && k != "GIT_EXTERNAL_DIFF" {
+                m.insert(k.clone(), v.clone());
+            }
         }
         m.insert("PATH".into(), self.path.clone());
         m.into_iter().collect()
     }
+}
+
+/// Git command-scope configuration outranks repository and global config.
+/// Paths must refer to an app-controlled empty file and empty directory.
+pub fn git_environment(
+    env: &EnvSpec,
+    empty_config: &Path,
+    empty_hooks: &Path,
+) -> Vec<(String, String)> {
+    let mut vars: BTreeMap<_, _> = env.vars().into_iter().collect();
+    vars.retain(|k, _| !k.starts_with("GIT_CONFIG_") && k != "GIT_EXTERNAL_DIFF");
+    vars.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+    vars.insert(
+        "GIT_CONFIG_GLOBAL".into(),
+        empty_config.to_string_lossy().into_owned(),
+    );
+    let settings = [
+        ("core.fsmonitor", "false".to_owned()),
+        ("core.hooksPath", empty_hooks.to_string_lossy().into_owned()),
+        ("core.pager", "cat".to_owned()),
+        ("diff.external", String::new()),
+        ("core.sshCommand", String::new()),
+        ("credential.helper", String::new()),
+        ("safe.directory", env.home.to_string_lossy().into_owned()),
+    ];
+    vars.insert("GIT_CONFIG_COUNT".into(), settings.len().to_string());
+    for (n, (key, value)) in settings.into_iter().enumerate() {
+        vars.insert(format!("GIT_CONFIG_KEY_{n}"), key.into());
+        vars.insert(format!("GIT_CONFIG_VALUE_{n}"), value);
+    }
+    vars.into_iter().collect()
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +295,13 @@ pub fn sweep_orphans(pidfiles: &[PathBuf]) -> usize {
 
 static SPILL_SEQ: AtomicU64 = AtomicU64::new(1);
 
+struct GitConfigDir(PathBuf);
+impl Drop for GitConfigDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 struct Spill {
     file: std::fs::File,
     path: PathBuf,
@@ -291,11 +331,24 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
         .first()
         .ok_or_else(|| Error::Spec("empty argv".into()))?;
     let started = Instant::now();
+    // A private per-call directory prevents workspace config from supplying
+    // hooks or global configuration. Remove it when the call finishes.
+    let git_dir = spec.env.tmpdir.join(format!(
+        "git-config-{}-{}",
+        std::process::id(),
+        SPILL_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&git_dir)?;
+    let git_guard = GitConfigDir(git_dir);
+    let empty_config = git_guard.0.join("config");
+    let empty_hooks = git_guard.0.join("hooks");
+    std::fs::write(&empty_config, [])?;
+    std::fs::create_dir(&empty_hooks)?;
     let mut cmd = Command::new(argv0);
     cmd.args(&spec.argv[1..])
         .current_dir(&spec.cwd)
         .env_clear()
-        .envs(spec.env.vars())
+        .envs(git_environment(&spec.env, &empty_config, &empty_hooks))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -513,6 +566,50 @@ fn tree_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_overrides_and_credentials_cannot_be_injected() {
+        let env = EnvSpec {
+            path: "bin".into(),
+            home: "workspace".into(),
+            tmpdir: "tmp".into(),
+            extra: [
+                "PALMCODE_LLM_API_KEY",
+                "PALMCODE_LLM_BASE_URL",
+                "PALMCODE_LLM_MODEL",
+                "GIT_EXTERNAL_DIFF",
+                "GIT_CONFIG_KEY_99",
+                "GIT_CONFIG_COUNT",
+            ]
+            .into_iter()
+            .map(|k| (k.into(), "untrusted".into()))
+            .collect(),
+        };
+        let vars: BTreeMap<_, _> = git_environment(&env, Path::new("empty"), Path::new("hooks"))
+            .into_iter()
+            .collect();
+        assert!(!vars.keys().any(|k| k.starts_with("PALMCODE_LLM_")
+            || k == "GIT_EXTERNAL_DIFF"
+            || k == "GIT_CONFIG_KEY_99"));
+        assert_eq!(vars["GIT_CONFIG_NOSYSTEM"], "1");
+        assert_eq!(vars["GIT_CONFIG_GLOBAL"], "empty");
+        assert_eq!(vars["GIT_CONFIG_COUNT"], "7");
+        for (n, (key, value)) in [
+            ("core.fsmonitor", "false"),
+            ("core.hooksPath", "hooks"),
+            ("core.pager", "cat"),
+            ("diff.external", ""),
+            ("core.sshCommand", ""),
+            ("credential.helper", ""),
+            ("safe.directory", "workspace"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(vars[&format!("GIT_CONFIG_KEY_{n}")], key);
+            assert_eq!(vars[&format!("GIT_CONFIG_VALUE_{n}")], value);
+        }
+    }
 
     #[test]
     fn env_is_an_allowlist_sorted_and_deterministic() {
