@@ -340,3 +340,16 @@ CI check; local A/B verification covered BusyBox binaries.
   a Kill action; Kill stops the turn and clears cached session grants.
 - PARTIAL: Settings can rerun a ten-second packaged-userland smoke test.
   Android compilation is in progress; device behavior remains PENDING.
+
+## Stage 2 foreground lifetime (2026-10-25)
+
+- DONE: assembleDebug builds both ABIs and Kotlin with restored cards,
+  diagnostics and a dataSync foreground service. The service has a persistent
+  Stop action and holds a partial wake lock only during tracked turns.
+- DONE: notification permission and optional battery settings explanation
+  are requested once. Android dataSync timeout cancels turns without retry.
+- PENDING: notification visibility/denial, screen-off, Doze/app standby,
+  timeout and wake-lock behavior on device. No device commands were used.
+- DONE: both RunTracker JVM tests pass (overlapping turns, duplicate/terminal
+  events, failed-start retry and immutable snapshots). JUnit and Hamcrest
+  checksum pins were added to Gradle dependency verification metadata.

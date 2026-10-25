@@ -212,11 +212,41 @@ object AppState {
  */
 object CoreManager {
     private val main = Handler(Looper.getMainLooper())
+    private lateinit var appContext: Context
+    private val runs = RunTracker()
+    val activeRuns: Set<String> get() = runs.active
+
+    fun stopActiveRuns() {
+        activeRuns.toList().forEach { stop(it) }
+    }
+
+    private fun beginRun(sessionId: String) {
+        check(runs.begin(sessionId)) { "Session already running" }
+        try {
+            RunService.start(appContext)
+        } catch (e: Exception) {
+            runs.finish(sessionId)
+            throw e
+        }
+    }
+
+    private fun finishRun(sessionId: String) {
+        runs.finish(sessionId)
+        if (activeRuns.isEmpty()) RunService.stop(appContext)
+    }
     // Strong ref: the UniFFI callback object must not be GC'd.
     private val listener = object : CoreEventListener {
         override fun onEvents(events: List<CoreEvent>) {
             main.post {
                 AppState.apply(events)
+                for (event in events) {
+                    when (event) {
+                        is CoreEvent.MessageFinished -> finishRun(event.sessionId)
+                        is CoreEvent.Interrupted -> finishRun(event.sessionId)
+                        is CoreEvent.TurnError -> finishRun(event.sessionId)
+                        else -> {}
+                    }
+                }
                 if (events.any { it is CoreEvent.SessionCreated }) refreshSessions()
             }
         }
@@ -228,6 +258,7 @@ object CoreManager {
     @Synchronized
     fun ensureStarted(context: Context) {
         if (started) return
+        appContext = context.applicationContext
         check(PalmcodeCore.nativeInitAndroid(context) == 0) { "native TLS init failed" }
         coreStart(File(context.filesDir, "palmcode.db").absolutePath, listener)
         store = ProviderStore(context.applicationContext)
@@ -270,13 +301,27 @@ object CoreManager {
     }
 
     fun send(sessionId: String, text: String): Result<Unit> = runCatching {
-        messageSend(sessionId, text)
+        beginRun(sessionId)
+        try {
+            messageSend(sessionId, text)
+        } catch (e: Exception) {
+            finishRun(sessionId)
+            throw e
+        }
         Unit
     }
 
     fun stop(sessionId: String) = turnStop(sessionId)
 
-    fun resumeChat(sessionId: String) = turnResume(sessionId)
+    fun resumeChat(sessionId: String) {
+        beginRun(sessionId)
+        try {
+            turnResume(sessionId)
+        } catch (e: Exception) {
+            finishRun(sessionId)
+            throw e
+        }
+    }
 
     // ---- M2: approvals + workspace ----
 
