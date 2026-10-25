@@ -1,5 +1,6 @@
 package dev.palmcode.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +36,7 @@ import dev.palmcode.app.ChatMsg
 import dev.palmcode.app.CoreManager
 import dev.palmcode.app.Screen
 import dev.palmcode.app.ToolCard
+import dev.palmcode.app.ui.theme.LocalContentStyles
 import dev.palmcode.core.toolDiff
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -117,7 +119,7 @@ fun ChatScreen(sessionId: String) {
                         color = if (accepted) {
                             MaterialTheme.colorScheme.primary
                         } else {
-                            MaterialTheme.colorScheme.outline
+                            MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
                 }
@@ -163,10 +165,12 @@ fun ChatScreen(sessionId: String) {
 
 @Composable
 private fun MessageBubble(sessionId: String, msg: ChatMsg) {
+    val styles = LocalContentStyles.current
     if (msg.role == "user") {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface,
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Text(msg.text, Modifier.padding(10.dp), style = MaterialTheme.typography.bodyMedium)
@@ -175,49 +179,58 @@ private fun MessageBubble(sessionId: String, msg: ChatMsg) {
         return
     }
     // assistant
-    Column(Modifier.fillMaxWidth()) {
-        if (msg.reasoning.isNotEmpty()) {
-            ReasoningPart(msg)
-        }
-        when {
-            msg.text.isNotEmpty() -> Markdown(
-                content = msg.text,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            )
-            msg.streaming -> Text(
-                "…",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.outline,
-            )
-        }
-        if (msg.tools.isNotEmpty()) {
-            Column(
-                Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                for (card in msg.tools) ToolCardView(card)
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(10.dp)) {
+            if (msg.reasoning.isNotEmpty()) {
+                ReasoningPart(msg)
             }
-        }
-        msg.error?.let { err ->
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
-                Column(Modifier.padding(8.dp)) {
-                    Text(err, style = MaterialTheme.typography.bodySmall)
+            when {
+                msg.text.isNotEmpty() -> Markdown(
+                    content = msg.text,
+                    colors = styles.markdownColors,
+                    typography = styles.markdownTypography,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                )
+                msg.streaming -> Text(
+                    "…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (msg.tools.isNotEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    for (card in msg.tools) ToolCardView(card)
+                }
+            }
+            msg.error?.let { err ->
+                Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
+                    Column(Modifier.padding(8.dp)) {
+                        Text(err, style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { CoreManager.resumeChat(sessionId) }) { Text("Resume") }
+                    }
+                }
+            }
+            if (msg.interrupted) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "interrupted",
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     TextButton(onClick = { CoreManager.resumeChat(sessionId) }) { Text("Resume") }
                 }
             }
-        }
-        if (msg.interrupted) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "interrupted",
-                    color = MaterialTheme.colorScheme.tertiary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                TextButton(onClick = { CoreManager.resumeChat(sessionId) }) { Text("Resume") }
+            if (!msg.streaming && msg.completionTokens != null) {
+                MetricsLine(msg)
             }
-        }
-        if (!msg.streaming && msg.completionTokens != null) {
-            MetricsLine(msg)
         }
     }
 }
@@ -227,7 +240,8 @@ private fun ReasoningPart(msg: ChatMsg) {
     // reasoning collapses once the answer starts; expandable for review
     var expanded by remember(msg.id) { mutableStateOf(msg.streaming) }
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -260,12 +274,14 @@ private fun MetricsLine(msg: ChatMsg) {
     Text(
         parts.joinToString(" · "),
         style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.outline,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
 @Composable
 private fun ToolCardView(card: ToolCard) {
+    val styles = LocalContentStyles.current
+    val failed = card.done && !card.ok
     var expanded by remember(card.id) { mutableStateOf(false) }
     var diffs by remember(card.id) { mutableStateOf<List<dev.palmcode.core.ToolDiffRecord>?>(null) }
     LaunchedEffect(card.id, expanded, card.done) {
@@ -274,7 +290,8 @@ private fun ToolCardView(card: ToolCard) {
         }
     }
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -291,16 +308,26 @@ private fun ToolCardView(card: ToolCard) {
                     card.path?.let { append(" $it") }
                     if (card.done) append(" · ${card.durationMs} ms")
                 }
-                Text(label, style = MaterialTheme.typography.labelMedium)
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
+                )
             }
             if (expanded) {
                 if (card.preview.isNotEmpty()) {
-                    Text(
-                        card.preview,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 8.dp),
-                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            card.preview,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                        )
+                    }
                 }
                 diffs?.forEach { d ->
                     if (d.diff.isNotEmpty()) {
@@ -310,19 +337,19 @@ private fun ToolCardView(card: ToolCard) {
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         )
                         for (line in d.diff.lineSequence()) {
-                            val color = when {
-                                line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@") ->
-                                    MaterialTheme.colorScheme.outline
-                                line.startsWith("-") -> MaterialTheme.colorScheme.error
-                                line.startsWith("+") -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            val header = line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")
+                            val background = when {
+                                header -> MaterialTheme.colorScheme.surfaceContainerHigh
+                                line.startsWith("-") -> styles.diffRemoved
+                                line.startsWith("+") -> styles.diffAdded
+                                else -> MaterialTheme.colorScheme.surfaceContainerHigh
                             }
                             Text(
                                 line,
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                color = color,
-                                modifier = Modifier.padding(horizontal = 8.dp),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.fillMaxWidth().background(background).padding(horizontal = 8.dp),
                             )
                         }
                     }

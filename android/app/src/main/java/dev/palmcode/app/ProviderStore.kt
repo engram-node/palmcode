@@ -4,11 +4,16 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import dev.palmcode.core.ProviderConfigRecord
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
+
+enum class ThemeMode { System, Light, Dark }
 
 /**
  * BYOK provider configuration. The API key lives only as a Keystore-wrapped
@@ -19,6 +24,23 @@ import javax.crypto.spec.GCMParameterSpec
 class ProviderStore(context: Context) {
 
     private val prefs = context.getSharedPreferences("provider", Context.MODE_PRIVATE)
+
+    // Load appearance once. Snapshot state updates the root theme immediately;
+    // streamed content never reads preferences.
+    var themeMode by mutableStateOf(
+        prefs.getString("theme_mode", null).let { saved ->
+            ThemeMode.entries.firstOrNull { it.name == saved } ?: ThemeMode.System
+        },
+    )
+        private set
+    var dynamicColor by mutableStateOf(prefs.getBoolean("dynamic_color", true))
+        private set
+
+    fun setAppearance(mode: ThemeMode = themeMode, dynamic: Boolean = dynamicColor) {
+        prefs.edit().putString("theme_mode", mode.name).putBoolean("dynamic_color", dynamic).apply()
+        themeMode = mode
+        dynamicColor = dynamic
+    }
 
     var baseUrl: String
         get() = prefs.getString("base_url", "") ?: ""

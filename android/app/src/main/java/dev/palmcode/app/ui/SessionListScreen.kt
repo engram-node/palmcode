@@ -68,7 +68,7 @@ fun SessionListScreen() {
             Row {
                 LicensesButton()
                 TextButton(onClick = { AppState.screen = Screen.Workspaces }) { Text("Workspaces") }
-                TextButton(onClick = { AppState.screen = Screen.Setup }) { Text("Provider") }
+                TextButton(onClick = { AppState.screen = Screen.Setup }) { Text("Settings") }
             }
         }
 
@@ -90,7 +90,7 @@ fun SessionListScreen() {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(AppState.sessions, key = { it.id }) { s ->
                 Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = MaterialTheme.colorScheme.surfaceContainer,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { CoreManager.openChat(s.id) },

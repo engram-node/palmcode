@@ -2,6 +2,8 @@ package dev.palmcode.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -15,6 +17,7 @@ import dev.palmcode.app.ui.theme.PalmcodeTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         CoreManager.ensureStarted(applicationContext)
         // Returning to a configured app: decrypt the Keystore-wrapped key,
         // hand it to Rust, land on the session list.
@@ -23,7 +26,17 @@ class MainActivity : ComponentActivity() {
             CoreManager.refreshSessions()
         }
         setContent {
-            PalmcodeTheme {
+            PalmcodeTheme(
+                mode = CoreManager.store.themeMode,
+                dynamicColor = CoreManager.store.dynamicColor,
+                onDarkThemeChanged = { dark ->
+                    val bars = SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                    ) { dark }
+                    enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+                },
+            ) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     when (val s = AppState.screen) {
                         Screen.Setup -> SetupScreen(onSaved = {
