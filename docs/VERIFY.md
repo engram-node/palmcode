@@ -363,3 +363,18 @@ CI check; local A/B verification covered BusyBox binaries.
   all four JVM unit tests pass. The receiver is non-exported.
 - PENDING: actual delivery, session navigation, action dispatch and denied
   notification permission behavior on device remain maintainer checks.
+
+## Stage 2 unattended bash (2026-10-25)
+
+- PARTIAL: trusted-only session toggle, visible banner, default-off state,
+  and hard-ask revalidation before cached grants. Unknown effects and
+  recursive/directory mutations still prompt (ADR 0022 records this cut).
+- DONE: two new policy tests cover trusted opt-in/reset, ordinary mutations,
+  network/git operations, protected files, outside paths, malformed parsing,
+  wrappers, expansions and globs. Existing exact-grant regression updated
+  to require a prompt for recursive wildcard deletion.
+- DONE: permissions crate tests and permissions/agent/FFI clippy pass.
+- PENDING: Android toggle behavior is not device-verified.
+- DONE: Android debug build and JVM unit tests pass for the preceding
+  notification receiver changes; unattended-toggle build is tracked at
+  the final stage gate below.

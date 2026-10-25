@@ -21,12 +21,16 @@ pub enum Outcome {
 /// Workspace used by the file tools' canonical path policy.
 pub struct ClassCtx {
     pub workspace: PathBuf,
+    auto: bool,
+    remember: bool,
 }
 
 impl ClassCtx {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
+            auto: false,
+            remember: false,
         }
     }
 }
@@ -55,6 +59,29 @@ pub fn classify(cmd: &str, ctx: &ClassCtx) -> Outcome {
         Ok(v) => v,
         Err(reason) => Outcome::Ask(format!("unparseable command: {reason}")),
     }
+}
+
+/// Classify eligibility for unattended execution, failing closed on unknown effects.
+pub fn unattended(cmd: &str, ctx: &ClassCtx) -> Outcome {
+    classify(
+        cmd,
+        &ClassCtx {
+            workspace: ctx.workspace.clone(),
+            auto: true,
+            remember: false,
+        },
+    )
+}
+
+pub fn revalidate_grant(cmd: &str, ctx: &ClassCtx) -> Outcome {
+    classify(
+        cmd,
+        &ClassCtx {
+            workspace: ctx.workspace.clone(),
+            auto: true,
+            remember: true,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +647,106 @@ fn classify_command(words: &[Word], ctx: &ClassCtx) -> Result<Outcome, String> {
         .map(|w| w.lit.trim())
         .collect();
 
+    if ctx.auto {
+        if matches!(
+            name,
+            "git"
+                | "curl"
+                | "wget"
+                | "nc"
+                | "ncat"
+                | "netcat"
+                | "ssh"
+                | "scp"
+                | "sftp"
+                | "ftp"
+                | "telnet"
+                | "ping"
+                | "ping6"
+                | "nslookup"
+                | "dig"
+                | "http"
+                | "https"
+                | "busybox"
+                | "sh"
+                | "bash"
+                | "ash"
+                | "dash"
+                | "zsh"
+                | "env"
+                | "eval"
+                | "exec"
+                | "command"
+                | "timeout"
+                | "nice"
+                | "nohup"
+                | "setsid"
+                | "xargs"
+                | "source"
+                | "."
+        ) {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("network or wrapper command requires approval".into()),
+            ));
+        }
+        let mutating = matches!(
+            name,
+            "mkdir"
+                | "touch"
+                | "cp"
+                | "mv"
+                | "rm"
+                | "rmdir"
+                | "chmod"
+                | "chown"
+                | "truncate"
+                | "tee"
+        );
+        if words
+            .iter()
+            .any(|w| w.dynamic || w.is_assignment() || w.lit.contains(['*', '?', '[', ']', '~']))
+        {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("dynamic command requires approval".into()),
+            ));
+        }
+        if mutating {
+            // Recursive operations can reach protected descendants that are not
+            // explicit operands. Never infer those effects from the command text.
+            for arg in &args {
+                if arg.starts_with('-')
+                    && (arg.contains('r') || arg.contains('R') || arg.starts_with("--"))
+                {
+                    return Ok(max(
+                        verdict,
+                        Outcome::Ask("recursive or extended mutation requires approval".into()),
+                    ));
+                }
+                if !arg.starts_with('-')
+                    && resolve(arg, ctx).is_some_and(|p| p == ctx.workspace || p.is_dir())
+                    && name != "mkdir"
+                {
+                    return Ok(max(
+                        verdict,
+                        Outcome::Ask("directory mutation requires approval".into()),
+                    ));
+                }
+            }
+            return Ok(verdict);
+        }
+        if !ctx.remember && !readonly_grammar(name, &args) {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("command effects require explicit approval".into()),
+            ));
+        }
+        if ctx.remember {
+            return Ok(verdict);
+        }
+    }
+
     let v = if matches!(name, "sh" | "bash" | "ash" | "dash" | "zsh" | "rbash") {
         // Inspect nested scripts for Deny, but never auto-approve a wrapper.
         let nested = args
@@ -726,6 +853,16 @@ fn check_write_target(target: &str, ctx: &ClassCtx) -> Outcome {
     if t.contains(['~', '$', '`']) {
         return Outcome::Ask("path contains shell expansion syntax".into());
     }
+    if ctx.auto {
+        let checked = check_read_target(t, ctx);
+        if checked != Outcome::Allow {
+            return checked;
+        }
+        if resolve(t, ctx).is_some_and(|p| p != ctx.workspace && !p.is_dir()) {
+            return Outcome::Allow;
+        }
+        return Outcome::Ask("directory write requires approval".into());
+    }
     match resolve(t, ctx) {
         Some(p) => {
             if p.starts_with(&ctx.workspace) {
@@ -783,6 +920,14 @@ fn check_read_target(target: &str, ctx: &ClassCtx) -> Outcome {
                 || name.starts_with("credentials")
         })
     };
+    if ctx.auto
+        && [Path::new(t), resolved.as_path()].iter().any(|path| {
+            path.components()
+                .any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".palmcode")
+        })
+    {
+        return Outcome::Ask("protected workspace metadata requires approval".into());
+    }
     if secret(Path::new(t)) || secret(&resolved) {
         Outcome::Ask(format!("secret-file read: {t}"))
     } else {

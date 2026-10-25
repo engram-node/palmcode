@@ -34,7 +34,8 @@ fn bash_approvals_are_exact_match_not_globs() {
     let ctx = ClassCtx::new(dir.path());
     // DB approvals allow exactly those command strings...
     assert!(matches!(e.decide_bash("make build", &ctx), Outcome::Allow));
-    assert!(matches!(e.decide_bash("rm -rf *", &ctx), Outcome::Allow));
+    // Protected/dynamic effects always prompt, even for an exact DB grant.
+    assert!(matches!(e.decide_bash("rm -rf *", &ctx), Outcome::Ask(_)));
     // ...and nothing else, even prefix- or glob-shaped
     assert!(matches!(e.decide_bash("rm -rf /", &ctx), Outcome::Deny(_))); // abs escape
     assert!(matches!(e.decide_bash("rm -rf tmp", &ctx), Outcome::Ask(_)));

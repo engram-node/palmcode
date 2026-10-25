@@ -54,6 +54,13 @@ fun ChatScreen(sessionId: String) {
     var input by remember { mutableStateOf("") }
     val streaming = transcript.lastOrNull()?.streaming == true
     val context = androidx.compose.ui.platform.LocalContext.current
+    var trusted by remember(AppState.workspace) { mutableStateOf(false) }
+    LaunchedEffect(AppState.workspace, sessionId) {
+        trusted = withContext(Dispatchers.IO) {
+            dev.palmcode.core.workspacesList().any { it.rootPath == AppState.workspace && it.trusted }
+        }
+        AppState.unattendedBash[sessionId] = dev.palmcode.core.sessionUnattendedBashOn(sessionId)
+    }
 
     // follow new turns and the streaming tail (only if near the bottom)
     LaunchedEffect(transcript.size) {
@@ -91,6 +98,18 @@ fun ChatScreen(sessionId: String) {
         }
 
         // workspace toggle: BUILD mode needs one linked root
+        if (trusted) {
+            val unattended = AppState.unattendedBash[sessionId] == true
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.Switch(checked = unattended,
+                    onCheckedChange = { CoreManager.setUnattendedBash(sessionId, it) })
+                Text("Run commands without asking", style = MaterialTheme.typography.labelMedium)
+            }
+            if (unattended) Surface(color = MaterialTheme.colorScheme.tertiaryContainer) {
+                Text("Commands auto-approved · sensitive or unclassified operations still ask",
+                    style = MaterialTheme.typography.labelSmall, modifier = Modifier.fillMaxWidth().padding(8.dp))
+            }
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
             val ws = AppState.workspace
             TextButton(onClick = { AppState.screen = Screen.Workspaces }) {

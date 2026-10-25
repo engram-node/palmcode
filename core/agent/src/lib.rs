@@ -725,6 +725,16 @@ impl Engine {
         });
     }
 
+    pub fn set_unattended_bash(&self, session_id: &str, on: bool) -> bool {
+        self.tools_ctx(session_id)
+            .is_some_and(|ctx| ctx.perms.set_unattended_bash(on))
+    }
+
+    pub fn unattended_bash_on(&self, session_id: &str) -> bool {
+        self.tools_ctx(session_id)
+            .is_some_and(|ctx| ctx.perms.unattended_bash_on())
+    }
+
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }

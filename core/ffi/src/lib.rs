@@ -595,6 +595,16 @@ pub fn workspace_current() -> Option<String> {
 }
 
 #[uniffi::export]
+pub fn session_set_unattended_bash(session_id: String, on: bool) -> bool {
+    engine().is_ok_and(|e| e.set_unattended_bash(&session_id, on))
+}
+
+#[uniffi::export]
+pub fn session_unattended_bash_on(session_id: String) -> bool {
+    engine().is_ok_and(|e| e.unattended_bash_on(&session_id))
+}
+
+#[uniffi::export]
 pub fn workspace_clear() {
     if let Ok(e) = engine() {
         e.clear_workspace();

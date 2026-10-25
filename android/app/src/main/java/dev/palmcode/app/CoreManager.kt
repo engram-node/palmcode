@@ -80,6 +80,7 @@ object AppState {
     val approvals = mutableStateListOf<Approval>()
     /** "Accept edits for this session" toggle state, per session id. */
     val acceptEdits = mutableStateMapOf<String, Boolean>()
+    val unattendedBash = mutableStateMapOf<String, Boolean>()
     var workspace by mutableStateOf<String?>(null)
     private val transcripts = mutableStateMapOf<String, SnapshotStateList<ChatMsg>>()
 
@@ -327,7 +328,14 @@ object CoreManager {
         Unit
     }
 
-    fun stop(sessionId: String) = turnStop(sessionId)
+    fun stop(sessionId: String) {
+        turnStop(sessionId)
+        AppState.unattendedBash.remove(sessionId)
+    }
+
+    fun setUnattendedBash(sessionId: String, on: Boolean) {
+        AppState.unattendedBash[sessionId] = dev.palmcode.core.sessionSetUnattendedBash(sessionId, on)
+    }
 
     fun resumeChat(sessionId: String) {
         beginRun(sessionId)
@@ -355,11 +363,13 @@ object CoreManager {
 
     fun setWorkspace(root: String) {
         workspaceSet(root)
+        AppState.unattendedBash.clear()
         AppState.workspace = root
     }
 
     fun clearWorkspace() {
         workspaceClear()
+        AppState.unattendedBash.clear()
         AppState.workspace = null
     }
 
