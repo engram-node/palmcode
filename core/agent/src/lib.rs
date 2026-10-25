@@ -407,6 +407,8 @@ impl Engine {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let spill_base = db_dir.join("spill");
+        palmcode_exec::enable_subreaper().map_err(|e| EngineError::Tools(e.to_string()))?;
+        palmcode_exec::sweep_spill(&spill_base);
         let engine = Self {
             rt,
             store,
@@ -1800,6 +1802,48 @@ impl BashTap {
     }
 }
 
+/// A quiet command still flushes its last short line while it is running.
+struct TimedBashTap {
+    tap: Arc<Mutex<BashTap>>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TimedBashTap {
+    fn new(tap: BashTap) -> Self {
+        let tap = Arc::new(Mutex::new(tap));
+        let timer_tap = tap.clone();
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while matches!(
+                receiver.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                timer_tap.lock().unwrap().flush();
+            }
+            timer_tap.lock().unwrap().flush();
+        });
+        Self {
+            tap,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        self.tap.lock().unwrap().push(bytes);
+    }
+}
+
+impl Drop for TimedBashTap {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn bash_tap(
     engine: &Engine,
     session_id: &str,
@@ -1825,10 +1869,10 @@ fn exec_one_owned(
     tap: Option<BashTap>,
 ) -> (String, bool, u64, Option<String>) {
     let t = Instant::now();
-    let mut tap = tap;
+    let tap = tap.map(TimedBashTap::new);
     let out = {
         let mut sink = |chunk: &[u8]| {
-            if let Some(t) = tap.as_mut() {
+            if let Some(t) = tap.as_ref() {
                 t.push(chunk);
             }
         };
@@ -1845,9 +1889,7 @@ fn exec_one_owned(
         };
         palmcode_tools::run_tool(&spec.name, &spec.arguments, &tctx)
     };
-    if let Some(t) = tap.as_mut() {
-        t.flush();
-    }
+    drop(tap);
     let dur = t.elapsed().as_millis() as u64;
     match out {
         Ok(capped) => (
@@ -2240,6 +2282,62 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bash_tap_flushes_on_timer_and_on_exit() {
+        struct Collector(Mutex<Vec<Event>>);
+        impl EventSink for Collector {
+            fn on_batch(&self, events: Vec<Event>) {
+                self.0.lock().unwrap().extend(events);
+            }
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let collector = Arc::new(Collector(Mutex::new(Vec::new())));
+        let emitter = Emitter::start(rt.handle().clone(), collector.clone());
+        let tap = TimedBashTap::new(BashTap {
+            emitter: emitter.clone(),
+            seq: Arc::new(AtomicU64::new(0)),
+            session_id: "session".into(),
+            message_id: 1,
+            call_id: "call".into(),
+            buf: Vec::new(),
+            total: 0,
+            last: Instant::now(),
+        });
+        tap.push(b"quiet line");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            emitter.flush();
+            if collector
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::ToolOutput { chunk, .. } if chunk == "quiet line"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer did not flush quiet output"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tap.push(b"final line");
+        drop(tap);
+        emitter.flush();
+        let events = collector.0.lock().unwrap();
+        let output: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolOutput {
+                    chunk, total_bytes, ..
+                } => Some((chunk.as_str(), *total_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(output, [("quiet line", 10), ("final line", 20)]);
+    }
 
     #[test]
     fn prompt_family_switch() {

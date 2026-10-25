@@ -10,6 +10,8 @@
 
 mod host;
 mod native;
+mod recovery;
+pub use recovery::{enable_subreaper, sweep_spill};
 
 pub mod applets;
 
@@ -42,6 +44,23 @@ pub const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Capture window kept inline: head + tail of the merged stream.
 pub const CAPTURE_HEAD: usize = 32 * 1024;
 pub const CAPTURE_TAIL: usize = 32 * 1024;
+pub const OUTPUT_CAP: usize = 32 * 1024 * 1024;
+pub const OUTPUT_CAP_MARKER: &[u8] = b"\n[output limit reached; remaining output discarded]\n";
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+static RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TreeGuard {
+    pid: u32,
+    before: Vec<(u32, u64)>,
+    began: u64,
+}
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        kill_group_force(self.pid);
+        recovery::sweep_children(&self.before, self.pid, self.began);
+    }
+}
 
 /// Merged stdout+stderr chunks as they arrive (live stream for tool cards).
 pub trait OutputSink {
@@ -272,14 +291,13 @@ pub trait Executor: Send + Sync {
 
 /// Force-kill any process groups recorded in leftover pidfiles (resume path
 /// after kill-mid-command). Returns how many groups were signalled.
-/// shortcut: a stale pidfile can hit a reused pid, record process start-time
-/// in the pidfile if pidfiles ever live longer than one session.
+/// PID, process start time and boot identity must all match before signalling.
 pub fn sweep_orphans(pidfiles: &[PathBuf]) -> usize {
     let mut swept = 0;
     for pf in pidfiles {
         if let Some(pid) = std::fs::read_to_string(pf)
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
+            .and_then(|s| recovery::verified_pid(&s))
             && kill_group_force(pid)
         {
             swept += 1;
@@ -330,6 +348,11 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
         .argv
         .first()
         .ok_or_else(|| Error::Spec("empty argv".into()))?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let _run_lock = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_subreaper()?;
+    let before = recovery::children();
+    let began = recovery::start_tick();
     let started = Instant::now();
     // A private per-call directory prevents workspace config from supplying
     // hooks or global configuration. Remove it when the call finishes.
@@ -357,12 +380,15 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
         .spawn()
         .map_err(|e| Error::Spawn(format!("{argv0}: {e}")))?;
     let pid = child.id();
-    if let Some(pf) = &spec.pidfile {
-        let _ = std::fs::write(pf, format!("{pid}\n"));
+    let _tree_guard = TreeGuard { pid, before, began };
+    if let Some(pf) = &spec.pidfile
+        && let Some(record) = recovery::identity(pid)
+    {
+        std::fs::write(pf, record)?;
     }
 
     // Two reader threads merge into one channel; arrival order is the merge.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
     let mut pipes: Vec<Box<dyn Read + Send>> = Vec::new();
     if let Some(p) = child.stdout.take() {
         pipes.push(Box::new(p));
@@ -397,9 +423,40 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
     let mut timed_out = false;
     let mut cancelled = false;
     let mut status: Option<ExitStatus> = child.try_wait()?;
-    let mut last_data = Instant::now();
+    let mut eof = false;
+    let mut exited_at = None;
+    let mut remaining = OUTPUT_CAP - OUTPUT_CAP_MARKER.len();
+    let mut capped = false;
+    let mut collect = |chunk: &[u8]| -> Result<()> {
+        let n = chunk.len().min(remaining);
+        let kept = &chunk[..n];
+        sink.on_chunk(kept);
+        acc.push(kept);
+        if let Some(s) = &mut spill {
+            s.write(kept)?;
+        }
+        remaining -= n;
+        if n < chunk.len() && !capped {
+            capped = true;
+            sink.on_chunk(OUTPUT_CAP_MARKER);
+            acc.push(OUTPUT_CAP_MARKER);
+            if let Some(s) = &mut spill {
+                s.write(OUTPUT_CAP_MARKER)?;
+            }
+        }
+        Ok(())
+    };
 
     loop {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if status.is_some() && exited_at.is_none() {
+            // A successful leader exit does not authorize background children.
+            kill_group_force(pid);
+            recovery::sweep_children(&_tree_guard.before, pid, began);
+            exited_at = Some(Instant::now());
+        }
         if status.is_none() {
             if !timed_out && Instant::now() >= deadline {
                 terminate_tree(pid);
@@ -410,42 +467,32 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
                 cancelled = true;
             }
         }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(chunk) => {
-                sink.on_chunk(&chunk);
-                acc.push(&chunk);
-                if let Some(s) = &mut spill {
-                    s.write(&chunk)?;
-                }
-                last_data = Instant::now();
+        if eof {
+            // EOF is not process exit: continue checking the deadline/cancel.
+            if status.is_some() {
+                break;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if status.is_none() {
-                    status = child.try_wait()?;
-                }
-                // Child exited but a grandchild still holds the pipes open:
-                // the bash contract says command done = tree done (no
-                // leftovers), so reap stragglers and stop waiting.
-                if status.is_some() && last_data.elapsed() > Duration::from_millis(200) {
-                    terminate_tree(pid);
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(chunk) => collect(&chunk)?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => eof = true,
+        }
+        if exited_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200)) {
+            // Detached descendants must not hold completion hostage.
+            break;
         }
     }
-
-    // Drain whatever arrived while terminating (best effort).
-    while let Ok(chunk) = rx.try_recv() {
-        sink.on_chunk(&chunk);
-        acc.push(&chunk);
-        if let Some(s) = &mut spill {
-            s.write(&chunk)?;
-        }
+    // Bounded channel: final drain cannot grow without bound.
+    for _ in 0..16 {
+        let Ok(chunk) = rx.try_recv() else {
+            break;
+        };
+        collect(&chunk)?;
     }
-    if status.is_none() {
-        status = Some(child.wait()?);
-    }
+    drop(rx);
     if let Some(pf) = &spec.pidfile {
         let _ = std::fs::remove_file(pf);
     }

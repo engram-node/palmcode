@@ -4,7 +4,9 @@
 
 use std::time::{Duration, Instant};
 
-use palmcode_exec::{Cancel, CaptureLimits, EnvSpec, Executor, HostExecutor, sweep_orphans};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use palmcode_exec::sweep_orphans;
+use palmcode_exec::{Cancel, CaptureLimits, EnvSpec, Executor, HostExecutor};
 
 fn env(dir: &std::path::Path) -> EnvSpec {
     EnvSpec {
@@ -72,6 +74,91 @@ fn stdin_is_closed_immediate_eof() {
         .unwrap();
     assert_eq!(res.exit, Some(0));
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn timeout_still_applies_after_both_pipes_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = exec().spec("exec >&- 2>&-; sleep 300", dir.path(), env(dir.path()));
+    spec.timeout = Duration::from_millis(150);
+    let started = Instant::now();
+    let result = exec().run(&spec, &mut |_: &[u8]| {}).unwrap();
+    assert!(result.timed_out);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn successful_leader_exit_kills_closed_pipe_and_setsid_children() {
+    for script in [
+        "(exec >/dev/null 2>&1; sleep 0.5; echo survived > survivor) & sleep 0.1; exit 0",
+        "setsid sh -c 'exec >/dev/null 2>&1; sleep 0.5; echo survived > survivor' & sleep 0.1; exit 0",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        exec()
+            .run(
+                &exec().spec(script, dir.path(), env(dir.path())),
+                &mut |_: &[u8]| {},
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(!dir.path().join("survivor").exists(), "{script}");
+    }
+}
+
+#[test]
+fn output_cap_bounds_sink_capture_and_spill_and_drains_to_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = exec().spec(
+        "head -c 34603008 /dev/zero; echo done > completed",
+        dir.path(),
+        env(dir.path()),
+    );
+    spec.spill_dir = Some(dir.path().join("spill"));
+    let mut streamed = 0;
+    let result = exec()
+        .run(&spec, &mut |bytes: &[u8]| {
+            streamed += bytes.len();
+        })
+        .unwrap();
+    assert_eq!(result.exit, Some(0));
+    assert!(
+        dir.path().join("completed").exists(),
+        "over-cap output must be drained"
+    );
+    assert_eq!(streamed, palmcode_exec::OUTPUT_CAP);
+    assert_eq!(
+        result.captured.total_bytes,
+        palmcode_exec::OUTPUT_CAP as u64
+    );
+    assert!(
+        result
+            .captured
+            .render()
+            .contains("remaining output discarded")
+    );
+    assert_eq!(
+        std::fs::metadata(result.spill.unwrap()).unwrap().len(),
+        palmcode_exec::OUTPUT_CAP as u64
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn sweep_rejects_reused_pid_and_wrong_boot_and_consumes_legacy_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = std::process::id();
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    for record in [
+        format!("{pid} 0 {}", boot.trim()),
+        format!("{pid} 0 wrong-boot"),
+        pid.to_string(),
+    ] {
+        let file = dir.path().join("bash-stale.pid");
+        std::fs::write(&file, record).unwrap();
+        assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+        assert!(!file.exists());
+    }
 }
 
 #[test]
@@ -158,6 +245,7 @@ fn env_is_not_inherited_from_the_parent() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn stale_pidfile_sweep_reaps_the_group() {
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("run.pid");
@@ -170,7 +258,10 @@ fn stale_pidfile_sweep_reaps_the_group() {
     let mut pid = None;
     for _ in 0..100 {
         if let Ok(s) = std::fs::read_to_string(&pidfile) {
-            pid = s.trim().parse::<u32>().ok();
+            pid = s
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok());
             if pid.is_some() {
                 break;
             }
