@@ -378,3 +378,17 @@ CI check; local A/B verification covered BusyBox binaries.
 - DONE: Android debug build and JVM unit tests pass for the preceding
   notification receiver changes; unattended-toggle build is tracked at
   the final stage gate below.
+
+## Stage 2 benchmark variant (2026-10-25)
+
+- PARTIAL: release-derived bench variant is debug-signed under a separate
+  application id. Non-exported no-display activity and foreground runner
+  accept only numeric loopback HTTP endpoints and 1-1000 scripted tool turns.
+- DONE: bench APK and argument-validation unit test pass, including the
+  foreground runner. Release merged manifest and packaged DEX contain no
+  BenchActivity; the bench DEX contains it. Final gates are recorded below.
+- Cut: direct shell am-start cannot launch a non-exported activity. ADR 0023
+  documents a run-as alternative, not device-verified. Debuggable enables
+  run-as but disables JVM optimization; native Rust remains release-built.
+- PENDING: actual 50-turn execution, phase/OVERHEAD timing and run-as launch
+  on device. No mock or gateway traffic was generated in this session.

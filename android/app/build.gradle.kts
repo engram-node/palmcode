@@ -39,6 +39,13 @@ android {
             // Unsigned: F-Droid signs after building. Local verification uses
             // assembleDebug (debug-signed).
         }
+        create("bench") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".bench"
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+            matchingFallbacks += "release"
+        }
     }
 
     compileOptions {
@@ -72,6 +79,15 @@ android {
         named("release") {
             jniLibs.directories += "build/rust/release/jniLibs"
         }
+        named("bench") {
+            jniLibs.directories += "build/rust/release/jniLibs"
+        }
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().withBuildType("bench")) {
+        it.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true
     }
 }
 
