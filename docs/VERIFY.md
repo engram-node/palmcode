@@ -318,3 +318,13 @@ CI check; local A/B verification covered BusyBox binaries.
   shell handles deny deletion. The crash helper now waits for its release
   acknowledgement before deleting its directory; the regression passed
   again after that cleanup fix.
+
+## Stage 2 concurrency (2026-10-25)
+
+- DONE: bash executions share a four-slot gate across sessions; queued
+  cancellation does not spawn a child. Two queue regressions pass.
+- DONE: tools fmt and clippy with warnings denied; 66 tools tests pass with
+  the five process-executing bash tests excluded.
+- UNRUN: the full tools test run stalled in process execution in this
+  sandbox and was stopped. No Android behavior was exercised.
+- PENDING: device checks remain with the maintainer.

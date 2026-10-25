@@ -108,6 +108,7 @@ pub fn run(args_json: &str, b: &BashCtx, spill: &Spiller) -> Result<Capped> {
     )));
     spec.cancel = b.cancel.clone();
 
+    let _permit = BASH_SLOTS.acquire(b.cancel)?;
     let res = {
         let mut sink = |chunk: &[u8]| {
             if let Some(s) = b.sink.borrow_mut().as_mut() {
@@ -134,6 +135,92 @@ pub fn run(args_json: &str, b: &BashCtx, spill: &Spiller) -> Result<Capped> {
 }
 
 static PID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+// Shared across sessions: Android's phantom-process budget is per application.
+static BASH_SLOTS: Slots = Slots::new();
+
+struct Slots {
+    active: std::sync::Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+impl Slots {
+    const fn new() -> Self {
+        Self {
+            active: std::sync::Mutex::new(0),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(&self, cancel: &palmcode_exec::Cancel) -> Result<Permit<'_>> {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if cancel.is_cancelled() {
+                return Err(ToolError::Guard("bash: cancelled while queued".into()));
+            }
+            if *active < 4 {
+                *active += 1;
+                return Ok(Permit(self));
+            }
+            (active, _) = self
+                .changed
+                .wait_timeout(active, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+struct Permit<'a>(&'a Slots);
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active -= 1;
+        self.0.changed.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn fifth_waits_until_a_slot_is_released() {
+        let slots = Slots::new();
+        let cancel = palmcode_exec::Cancel::default();
+        let mut permits: Vec<_> = (0..4).map(|_| slots.acquire(&cancel).unwrap()).collect();
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let slots = &slots;
+            let cancel = &cancel;
+            scope.spawn(move || {
+                let _permit = slots.acquire(cancel).unwrap();
+                tx.send(()).unwrap();
+            });
+            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+            permits.pop();
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        drop(permits);
+        assert_eq!(*slots.active.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn queued_cancellation_never_consumes_a_slot() {
+        let slots = Slots::new();
+        let cancel = palmcode_exec::Cancel::default();
+        let _permits: Vec<_> = (0..4).map(|_| slots.acquire(&cancel).unwrap()).collect();
+        std::thread::scope(|scope| {
+            let waiting = palmcode_exec::Cancel::default();
+            let child = waiting.clone();
+            let slots = &slots;
+            let handle = scope.spawn(move || slots.acquire(&child).is_err());
+            waiting.cancel();
+            assert!(handle.join().unwrap());
+        });
+        assert_eq!(*slots.active.lock().unwrap(), 4);
+    }
+}
 
 fn status_line(res: &palmcode_exec::ExecResult, timeout_ms: u64) -> String {
     let secs = res.duration.as_millis();
