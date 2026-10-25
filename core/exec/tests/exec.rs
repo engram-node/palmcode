@@ -143,6 +143,32 @@ fn output_cap_bounds_sink_capture_and_spill_and_drains_to_exit() {
     );
 }
 
+#[test]
+fn slow_sink_backpressures_the_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = exec().spec(
+        "head -c 1048576 /dev/zero; echo done > producer-finished",
+        dir.path(),
+        env(dir.path()),
+    );
+    let mut checked = false;
+    let result = exec()
+        .run(&spec, &mut |_: &[u8]| {
+            if !checked {
+                std::thread::sleep(Duration::from_millis(200));
+                assert!(
+                    !dir.path().join("producer-finished").exists(),
+                    "producer drained into an unbounded queue while the sink was blocked"
+                );
+                checked = true;
+            }
+        })
+        .unwrap();
+    assert!(checked);
+    assert_eq!(result.exit, Some(0));
+    assert!(dir.path().join("producer-finished").exists());
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn sweep_rejects_reused_pid_and_wrong_boot_and_consumes_legacy_records() {
@@ -229,9 +255,17 @@ fn env_is_not_inherited_from_the_parent() {
     // A secret in OUR env must never surface in the child's.
     // (set_var is unsafe in edition 2024; scope the mutation tightly.)
     unsafe { std::env::set_var("PALM_TEST_SECRET", "sk-do-not-leak") };
+    let mut child_env = env(dir.path());
+    for name in [
+        "PALMCODE_LLM_API_KEY",
+        "PALMCODE_LLM_BASE_URL",
+        "PALMCODE_LLM_MODEL",
+    ] {
+        child_env.extra.insert(name.into(), "test-only".into());
+    }
     let res = exec()
         .run(
-            &exec().spec("env", dir.path(), env(dir.path())),
+            &exec().spec("env", dir.path(), child_env),
             &mut |_b: &[u8]| {},
         )
         .unwrap();
@@ -242,6 +276,7 @@ fn env_is_not_inherited_from_the_parent() {
         "secret leaked: {rendered}"
     );
     assert!(!rendered.contains("PALM_TEST_SECRET"));
+    assert!(!rendered.contains("PALMCODE_LLM_"));
 }
 
 #[test]

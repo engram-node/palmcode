@@ -270,3 +270,51 @@ CI check; local A/B verification covered BusyBox binaries.
 | 2026-10-25 | System mode and system-bar icon flags, Android API 36 | PASS | Selected System and changed Android night mode from yes to no. Verified `LIGHT_STATUS_BARS` and `LIGHT_NAVIGATION_BARS` were set for Light (dark icons) and absent for Dark (light icons). Verified forced Dark overrides light Android and forced Light overrides dark Android, including process restarts. Waited for checked radio semantics before querying window flags; an initial immediate post-tap assertion raced recomposition. Restored System, Dynamic color on, and Android night mode yes. |
 | 2026-10-25 | Palette fidelity, chat/markdown/tool/diff contrast, safe insets and themed launcher icon | PENDING | Manual visual inspection still required: compare System/Light/Dark with dynamic color on/off; inspect links, fenced/inline code, bash output, errors and added/removed diff lines; open the keyboard and check system-bar/IME insets; enable themed launcher icons. No screenshots were captured. |
 | 2026-10-25 | Pre-31 static fallback and hidden Dynamic color switch | PENDING | On an API 29 or 30 device, verify the Dynamic color control is absent and System/Light/Dark use the explicit static palettes. The connected phone is API 36 only. |
+
+## Stage 1 bash hardening - 2026-10-25
+
+- DONE: workspace fmt and Clippy (`--workspace --all-targets -- -D warnings`),
+  plus `cargo deny check` (advisories, bans, licenses, sources).
+- PARTIAL: workspace tests were split to cap exec separately. The non-exec
+  run passed 155 tests, with one ignored subprocess helper and one failure:
+  `tools::bash::tests::timeout_kills_the_tree_fast` exceeded its 10-second
+  assertion on this Windows sandbox (53.81 seconds for the tools suite).
+  The other 68 tools tests passed. This is not a green workspace test gate.
+- UNRUN: Windows exec integration suite, capped at 60 seconds with
+  `--test-threads=1`; cancellation/process-tree checks stall here. The
+  stage-end attempt also waited for the build lock. Four exec unit tests
+  passed. Run the complete exec suite on an unrestricted host.
+- DONE: the host subprocess regression killed an engine during a real
+  HostExecutor bash call, restarted against the same database, checked
+  `interrupted, outcome unknown` in model history, and resumed against a
+  local mock. The command's start marker remained exactly one line and no
+  new ToolStarted event occurred. Timer and final BashTap flush tests passed.
+- DONE: attached Android API 36 phone, text-only adb: 5 exec unit tests and
+  15 integration tests passed, including post-EOF timeout, successful-exit
+  process-group cleanup, adopted setsid children, identity-checked pidfiles,
+  the 32 MiB cap/drain marker, slow-sink backpressure, and absence of the
+  actual app credential variable names from child `env` output.
+- DONE: 16 classifier tests and 3 userland tests passed on the same phone.
+  These test sources were linked as standalone Rust test harnesses against
+  the built crates. Coverage includes canonical symlink containment,
+  secret names, flag values, literal expansion syntax, injected lookup /
+  mkdir / link / executable failures, stale links and directory obstructions.
+  Temporary device test executables were removed.
+- DONE: `:android:app:assembleDebug` built both Android ABIs and Kotlin
+  bindings. The universal debug APK installed with `adb install -r` and
+  cold-launched via `am start -W`; the process remained live and the app's
+  sh/rg/git farm links pointed to the newly installed native directory.
+- PENDING: in-app injected-failure result presentation, kill-mid-command
+  recovery of the full Android app, screen-off survival, and the remaining
+  existing M2/M3 acceptance checks. No screenshots, UI tapping or live
+  gateway requests were used. Full M2/M3 acceptance is not claimed.
+- Risks: bash remains same-UID execution, not confinement. ADR 0017 records
+  serialized Linux/Android cleanup and the startup detached-child identity
+  gap. Windows process-control verification remains outstanding. Deferred
+  history, vendor, F-Droid, M4, HTTPS git and iOS work was not changed.
+  Local commit hooks could not run gitleaks because it was absent from PATH;
+  no history scan was attempted.
+  Earlier sandbox crash/stage test logs remain untracked because orphan
+  shell handles deny deletion. The crash helper now waits for its release
+  acknowledgement before deleting its directory; the regression passed
+  again after that cleanup fix.

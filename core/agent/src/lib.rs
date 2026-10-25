@@ -20,6 +20,8 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 #[cfg(any(test, target_os = "android"))]
 mod userland;
 
+#[cfg(all(test, not(target_os = "android")))]
+mod crash_tests;
 
 /// Coalesce streaming deltas at most every frame (~60 fps budget).
 const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
@@ -45,7 +47,7 @@ const SYSTEM_PROMPT_BUILD_GLM: &str = "You are palmcode, a coding agent running 
 # Limits
 - Paths are relative to the workspace root; absolute paths are refused.
 - Never read or modify secret files (.env, *.pem, keys) unless the task explicitly requires it.
-- Bash/shell/git tools are not available in this build; do not attempt them.
+- Use the bash tool for shell commands and git. Permission classification may require approval.
 - If a tool result is an error, adapt and continue; never repeat the identical call.
 
 # Style
@@ -61,7 +63,7 @@ const SYSTEM_PROMPT_BUILD_GENERIC: &str = "You are palmcode, a coding agent runn
 - If a tool result contains a `syntax:` warning or an error, correct it with your next tool call.
 - Independent read-only calls may be batched in one turn; writes are one concern per call.
 - Paths are relative to the workspace root. Never touch secret files (.env, private keys) unless required.
-- No bash/shell/git tools exist in this build.
+- Use the bash tool for shell commands and git. Permission classification may require approval.
 
 # Style
 - Be concise and precise. Report what changed and where. Do not restate file contents.";
@@ -101,7 +103,7 @@ fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>, model:
 /// before the volatile env block so the prompt head stays prefix-cacheable).
 fn command_catalog() -> String {
     format!(
-        "## Commands (shipped in the sandbox)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first.",
+        "## Commands (packaged userland)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first. Bash is not a sandbox: approved commands run with the app's UID and can access its files and network. An interrupted command has an unknown outcome; inspect the workspace before deciding whether to retry.",
         palmcode_exec::BUSYBOX_APPLETS.join(" ")
     )
 }
@@ -2356,7 +2358,13 @@ mod tests {
         for p in [SYSTEM_PROMPT_BUILD_GLM, SYSTEM_PROMPT_BUILD_GENERIC] {
             assert!(p.contains("BUILD mode"));
             assert!(p.contains("syntax:"));
+            assert!(p.contains("Use the bash tool"));
+            assert!(!p.contains("not available in this build"));
+            assert!(!p.contains("No bash/shell/git tools"));
         }
+        let catalog = command_catalog();
+        assert!(catalog.contains("Bash is not a sandbox"));
+        assert!(catalog.contains("unknown outcome"));
         // no workspace -> old chunk-only prompt
         assert_eq!(system_prompt(None, None, "glm-4.6"), SYSTEM_PROMPT);
     }
