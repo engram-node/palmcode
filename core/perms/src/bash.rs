@@ -34,66 +34,6 @@ impl ClassCtx {
     }
 }
 
-/// Commands that cannot write and cannot run other commands.
-const READ_ONLY: &[&str] = &[
-    "basename",
-    "cat",
-    "cut",
-    "date",
-    "dd",
-    "df",
-    "diff",
-    "dirname",
-    "du",
-    "echo",
-    "false",
-    "file",
-    "fgrep",
-    "grep",
-    "egrep",
-    "head",
-    "id",
-    "ls",
-    "md5sum",
-    "nproc",
-    "printenv",
-    "printf",
-    "pwd",
-    "readlink",
-    "realpath",
-    "rg",
-    "seq",
-    "sha1sum",
-    "sha256sum",
-    "sha512sum",
-    "sleep",
-    "sort",
-    "stat",
-    "tail",
-    "tr",
-    "true",
-    "uname",
-    "uniq",
-    "wc",
-    "which",
-    "whoami",
-];
-
-/// Network-capable: never Allow.
-const NETWORK: &[&str] = &[
-    "curl", "wget", "ftp", "ifconfig", "ip", "nc", "ncat", "netcat", "nmap", "ping", "rsync",
-    "scp", "sftp", "ssh", "telnet",
-];
-
-/// Interpreters/build tools: whatever they run is opaque -> Ask.
-const INTERPRETERS: &[&str] = &[
-    "awk", "busybox", "cmake", "dash", "expect", "irb", "java", "javac", "lua", "make", "node",
-    "perl", "php", "python", "python3", "ruby", "sed", "sqlite3",
-];
-
-/// Wrappers whose first real argument is itself a command to classify.
-const WRAPPERS: &[&str] = &["env", "command", "nice", "nohup", "time", "timeout"];
-
 fn rank(o: &Outcome) -> u8 {
     match o {
         Outcome::Allow => 1,
@@ -648,7 +588,11 @@ fn consume_heredoc(
 
 fn classify_command(words: &[Word], ctx: &ClassCtx) -> Result<Outcome, String> {
     let Some(cmd) = words.iter().find(|w| !w.is_assignment()) else {
-        return Ok(Outcome::Allow); // pure assignments
+        return Ok(if words.is_empty() {
+            Outcome::Allow
+        } else {
+            Outcome::Ask("environment assignments require approval".into())
+        });
     };
     let name = cmd.lit.trim();
     let mut verdict = Outcome::Allow;
@@ -679,99 +623,100 @@ fn classify_command(words: &[Word], ctx: &ClassCtx) -> Result<Outcome, String> {
         .map(|w| w.lit.trim())
         .collect();
 
-    let v = match name {
-        "find" => {
-            if args.iter().any(|a| {
-                matches!(
-                    *a,
-                    "-delete"
-                        | "-exec"
-                        | "-execdir"
-                        | "-ok"
-                        | "-okdir"
-                        | "-fls"
-                        | "-fprint"
-                        | "-fprint0"
-                        | "-fprintf"
-                )
-            }) {
-                Outcome::Ask("find with a write/exec action".into())
-            } else {
-                Outcome::Allow
-            }
-        }
-        "sort" if args.contains(&"-o") => Outcome::Ask("sort -o writes a file".into()),
-        "sh" | "bash" | "ash" | "dash" | "zsh" | "rbash" => {
-            // only `sh -c <script>`: classify the script text itself
-            match args
-                .iter()
-                .position(|a| *a == "-c")
-                .and_then(|p| args.get(p + 1))
-            {
-                Some(script) => classify(script, ctx),
-                None => Outcome::Ask("shell without -c runs an opaque script".into()),
-            }
-        }
-        _ if WRAPPERS.contains(&name) => {
-            // wrappers run the first non-flag, non-assignment argument;
-            // duration-like tokens (`timeout 5`, `nice -n 5`) are wrapper args
-            let mut inner: Vec<Word> = words
-                .iter()
-                .filter(|w| !w.is_assignment())
-                .skip(1)
-                .cloned()
-                .collect();
-            while inner
-                .first()
-                .map(|w| {
-                    w.lit.starts_with('-')
-                        || w.lit.contains('=')
-                        || w.lit
-                            .chars()
-                            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 's' | 'm' | 'h' | 'd'))
-                })
-                .unwrap_or(false)
-            {
-                inner.remove(0);
-            }
-            if inner.is_empty() {
-                Outcome::Allow
-            } else {
-                classify_command(&inner, ctx)?
-            }
-        }
-        "git" => {
-            let sub = args.first().copied().unwrap_or("");
-            if matches!(
-                sub,
-                "status"
-                    | "log"
-                    | "diff"
-                    | "show"
-                    | "blame"
-                    | "grep"
-                    | "rev-parse"
-                    | "ls-files"
-                    | "ls-tree"
-                    | "describe"
-                    | "shortlog"
-                    | "version"
-                    | "help"
-            ) {
-                Outcome::Allow
-            } else {
-                Outcome::Ask(format!("git {sub} can mutate the repository"))
-            }
-        }
-        "eval" | "exec" | "source" | "." => Outcome::Ask(format!("{name} runs opaque code")),
-        _ if READ_ONLY.contains(&name) => Outcome::Allow,
-        _ if NETWORK.contains(&name) => Outcome::Ask(format!("{name} touches the network")),
-        _ if INTERPRETERS.contains(&name) => Outcome::Ask(format!("{name} runs opaque code")),
-        _ => Outcome::Ask(format!(
-            "command `{name}` is not on the read-only allowlist"
-        )),
+    let v = if matches!(name, "sh" | "bash" | "ash" | "dash" | "zsh" | "rbash") {
+        // Inspect nested scripts for Deny, but never auto-approve a wrapper.
+        let nested = args
+            .windows(2)
+            .find(|a| a[0] == "-c")
+            .map(|a| classify(a[1], ctx))
+            .unwrap_or(Outcome::Allow);
+        max(
+            nested,
+            Outcome::Ask("shell wrapper requires approval".into()),
+        )
+    } else if words.iter().any(Word::is_assignment) {
+        Outcome::Ask("environment assignments require approval".into())
+    } else if readonly_grammar(name, &args) {
+        Outcome::Allow
+    } else {
+        Outcome::Ask(format!(
+            "command `{name}` or its arguments require approval"
+        ))
     };
     Ok(max(verdict, v))
+}
+
+/// Deliberately exact options: no combined, attached, abbreviated, or long
+/// variants are inferred. Git stays Ask until executor configuration is pinned.
+fn readonly_grammar(name: &str, args: &[&str]) -> bool {
+    let (flags, valued, min, max): (&[&str], &[&str], usize, usize) = match name {
+        "ls" => (&["-a", "-l", "-h", "-R", "-1"], &[], 0, 1),
+        "cat" => (&["-n", "-b", "-s", "-v", "-E", "-T"], &[], 0, 1),
+        "head" => (&["-q", "-v"], &["-n", "-c"], 0, 1),
+        "tail" => (&["-q", "-v", "-f"], &["-n", "-c"], 0, 1),
+        "wc" => (&["-l", "-w", "-c", "-m", "-L"], &[], 0, 1),
+        "pwd" => (&["-L", "-P"], &[], 0, 0),
+        "echo" => (&["-n", "-e", "-E"], &[], 0, 32),
+        "printf" => (&[], &[], 1, 32),
+        "grep" => (
+            &["-r", "-n", "-i", "-v", "-l", "-c", "-F", "-E", "-w", "-q"],
+            &[],
+            1,
+            2,
+        ),
+        "rg" => (&["-n", "-i", "-v", "-l", "-c", "-F", "-w", "-q"], &[], 1, 2),
+        "find" => (
+            &["-print", "-print0"],
+            &["-name", "-type", "-maxdepth", "-mindepth"],
+            1,
+            1,
+        ),
+        "sort" => (&["-n", "-r", "-u", "-f", "-b"], &[], 0, 1),
+        "uniq" => (&["-c", "-d", "-u", "-i"], &[], 0, 1),
+        "cut" => (&["-s"], &["-d", "-f", "-b", "-c"], 0, 1),
+        "tr" => (&["-d", "-s", "-c", "-C"], &[], 1, 2),
+        "basename" => (&[], &[], 1, 2),
+        "dirname" => (&[], &[], 1, 1),
+        "stat" => (&["-L"], &[], 1, 1),
+        _ => return false,
+    };
+    let mut operands = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if valued.contains(arg) {
+            let Some(value) = args.next() else {
+                return false;
+            };
+            let valid = match *arg {
+                "-n" | "-c" if matches!(name, "head" | "tail") => {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                }
+                "-maxdepth" | "-mindepth" => {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                }
+                "-type" => matches!(*value, "f" | "d" | "l"),
+                "-d" => value.chars().count() == 1,
+                "-f" | "-b" | "-c" => {
+                    !value.is_empty()
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'-'))
+                }
+                "-name" => !value.starts_with('-') && !value.contains('/'),
+                _ => false,
+            };
+            if !valid {
+                return false;
+            }
+        } else if arg.starts_with('-') {
+            if !flags.contains(arg) {
+                return false;
+            }
+        } else {
+            operands += 1;
+        }
+    }
+    (min..=max).contains(&operands)
 }
 
 /// A write redirection target: /dev/null is free, inside-workspace writes ask

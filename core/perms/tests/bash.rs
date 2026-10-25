@@ -55,53 +55,32 @@ fn bash_approvals_are_exact_match_not_globs() {
 #[test]
 fn plain_reads_allow() {
     for c in [
-        "ls -la",
-        "ls -la src/",
+        "ls -l -a",
+        "ls -l -a src/",
         "cat f.txt",
         "pwd",
         "echo hi",
         "printf '%s\n' f.txt",
         "rg TODO src/",
-        "grep -rn main .",
+        "grep -r -n main .",
         "wc -l < f.txt",
         "head -n 20 f.txt",
         "tail -f f.txt",
-        "cut -d: -f1 f.txt",
-        "diff a.txt b.txt",
+        "cut -d : -f 1 f.txt",
         "stat f.txt",
-        "file f.txt",
-        "which sh",
-        "realpath ./x",
         "sort f.txt",
         "uniq f.txt",
         "tr a-z A-Z < f.txt",
-        "date",
-        "uname -a",
-        "true",
-        "false",
         "echo a && echo b",
         "cat f.txt | wc -l",
         "cat a; cat b",
         "# just a comment",
-        "X=1 ls",
         "cat f.txt # trailing comment",
         "cat 'a#b'",
-        "git status",
-        "git log --oneline",
-        "git diff HEAD",
-        "git show HEAD:file.txt",
-        "git grep pattern",
         "find . -name '*.rs'",
         "find . -type f -print",
         "echo done\n",
-        "sha256sum f.txt",
-        "md5sum -c sums.txt",
         "sort f.txt > /dev/null",
-        "env",
-        "nice cat f.txt",
-        "nohup echo ok",
-        "timeout 5 cat f.txt",
-        "cat ~/.notes", // HOME == workspace root (bash tool env contract)
     ] {
         assert!(
             is_allow(c),
@@ -305,5 +284,86 @@ fn obfuscation_attempts_never_allow() {
         "find . -ok rm {} \\;",
     ] {
         assert!(!is_allow(c), "MUST NOT Allow: {c:?}");
+    }
+}
+
+#[test]
+fn explicit_flag_grammars_reject_bypasses() {
+    for command in [
+        "rg --pre tool pattern",
+        "rg --pre=tool pattern",
+        "rg --pre-glob '*' pattern",
+        "rg --pre-glob=* pattern",
+        "rg --hostname-bin tool pattern",
+        "rg --hostname-bin=tool pattern",
+        "uniq input output",
+        "sort -o output input",
+        "sort -ooutput input",
+        "sort --output output input",
+        "sort --output=output input",
+        "sort --compress-program tool input",
+        "sort --compress-program=tool input",
+        "find . -exec cat {} ;",
+        "find . -ok cat {} ;",
+        "find . -delete",
+        "find . -fprint output",
+        "find . -fprint0 output",
+        "find . -fprintf output format",
+        "find . -fls output",
+        "dd if=input of=output",
+        "tee output",
+        "sed p input",
+        "awk 1 input",
+        "xargs cat",
+        "tar cf output input",
+        "nohup cat input",
+        "env cat input",
+        "exec cat input",
+        "source input",
+        "command cat input",
+        "git status",
+        "git --output=output diff",
+        "git diff --ext-diff",
+        "git show --textconv HEAD",
+        "X=1 ls",
+        "PATH=bin; ls",
+        "ls -la",
+        "ls --all",
+        "cat a b",
+        "pwd extra",
+        "dirname a b",
+        "head -n20 input",
+        "cut -d: -f1 input",
+    ] {
+        assert!(is_ask(command), "expected Ask: {command:?}");
+    }
+}
+
+#[test]
+fn generated_dangerous_arguments_never_allow() {
+    for command in [
+        "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "grep", "rg", "find", "sort",
+        "uniq", "cut", "tr", "basename", "dirname", "stat", "git",
+    ] {
+        for arguments in [
+            "--pre=tool",
+            "--pre-glob=*",
+            "--hostname-bin=tool",
+            "--output=output",
+            "-ooutput",
+            "--compress-program=tool",
+            "-exec",
+            "-ok",
+            "-delete",
+            "-fprint",
+            "-fls",
+            "--ext-diff",
+            "--textconv",
+            "--unknown",
+            "a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g",
+        ] {
+            let script = format!("{command} {arguments}");
+            assert!(!is_allow(&script), "must not Allow: {script:?}");
+        }
     }
 }
