@@ -203,6 +203,11 @@ pub enum CoreEvent {
         session_id: Option<String>,
         on: bool,
     },
+    UserlandStatus {
+        seq: u64,
+        ok: bool,
+        message: String,
+    },
 }
 
 // `foreign`: Kotlin implements this trait; the Rust engine calls in.
@@ -405,6 +410,9 @@ impl EventSink for SinkAdapter {
                     session_id,
                     on,
                 },
+                Event::UserlandStatus { seq, ok, message } => {
+                    CoreEvent::UserlandStatus { seq, ok, message }
+                }
             })
             .collect();
         self.0.on_events(mapped);

@@ -17,6 +17,10 @@ use palmcode_llm::types::Message;
 use palmcode_store::{Store, StoredMessage, StoredPart, StoredSession};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
+#[cfg(any(test, target_os = "android"))]
+mod userland;
+
+
 /// Coalesce streaming deltas at most every frame (~60 fps budget).
 const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// Persist a streaming text snapshot at most this often (crash safety
@@ -108,6 +112,11 @@ fn command_catalog() -> String {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    UserlandStatus {
+        seq: u64,
+        ok: bool,
+        message: String,
+    },
     SessionCreated {
         seq: u64,
         session: SessionSummary,
@@ -438,6 +447,21 @@ impl Engine {
         // a tool left "pending" means the app died mid-execution: never
         // re-run; history replay synthesizes an "unknown outcome" result
         engine.store.mark_pending_tools_interrupted()?;
+        #[cfg(target_os = "android")]
+        {
+            let result = userland::prepare(
+                self_lib_dir(),
+                &engine.spill_base.join("userland/bin"),
+                &mut userland::NativeOps,
+            );
+            engine.emitter.emit_now(Event::UserlandStatus {
+                seq: engine.next_seq(),
+                ok: result.is_ok(),
+                message: result
+                    .map(|_| "userland ready".into())
+                    .unwrap_or_else(|message| message),
+            });
+        }
         // tools survive restarts: re-attach the most recently used workspace
         // (validated again — the SAF copy or the path may be gone)
         if let Some(w) = engine
@@ -1655,62 +1679,61 @@ async fn execute_calls(
 fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bash::Session {
     let tmpdir = spill_root.join("tmp");
     let _ = std::fs::create_dir_all(&tmpdir);
-    let mut extra = std::collections::BTreeMap::new();
-    // git trusts exactly this workspace (never safe.directory=*).
-    extra.insert("GIT_CONFIG_COUNT".into(), "1".into());
-    extra.insert("GIT_CONFIG_KEY_0".into(), "safe.directory".into());
-    extra.insert(
-        "GIT_CONFIG_VALUE_0".into(),
-        workspace_root.display().to_string(),
-    );
     let env = |path: String| palmcode_exec::EnvSpec {
         path,
         home: workspace_root.to_path_buf(),
         tmpdir: tmpdir.clone(),
-        extra: extra.clone(),
+        extra: Default::default(),
     };
 
-    // Android: libbusybox.so / librg.so / libgit.so live in the native lib
-    // dir (jniLibs packaging). Refresh links when an APK update moves the
-    // native lib dir; PATH serves the app-private farm and nothing else.
-    #[cfg(unix)]
-    if let Some(lib_dir) = self_lib_dir() {
-        let busybox = lib_dir.join("libbusybox.so");
-        if busybox.is_file() {
-            let farm = spill_root
-                .parent()
-                .unwrap_or(spill_root)
-                .join("userland")
-                .join("bin");
-            let _ = std::fs::create_dir_all(&farm);
-            for applet in palmcode_exec::BUSYBOX_APPLETS {
-                ensure_userland_symlink(&busybox, &farm.join(applet));
-            }
-            ensure_userland_symlink(&lib_dir.join("librg.so"), &farm.join("rg"));
-            ensure_userland_symlink(&lib_dir.join("libgit.so"), &farm.join("git"));
-            let path = farm.display().to_string();
-            return palmcode_tools::bash::Session {
-                exec: std::sync::Arc::new(palmcode_exec::NativeProcExecutor::new(
-                    farm.join("sh"),
-                    env(path.clone()),
-                )),
-                cwd: workspace_root.to_path_buf(),
-                env: env(path),
-            };
+    #[cfg(target_os = "android")]
+    {
+        let farm = spill_root
+            .parent()
+            .unwrap_or(spill_root)
+            .join("userland/bin");
+        palmcode_tools::bash::Session {
+            exec: Arc::new(AndroidBashExecutor {
+                shell: farm.join("sh"),
+                farm: farm.clone(),
+            }),
+            cwd: workspace_root.to_path_buf(),
+            env: env(farm.display().to_string()),
         }
     }
-
-    let exec = std::sync::Arc::new(palmcode_exec::HostExecutor::new());
-    let path = std::env::var("PATH").unwrap_or_default();
-    palmcode_tools::bash::Session {
-        exec,
-        cwd: workspace_root.to_path_buf(),
-        env: env(path),
+    #[cfg(not(target_os = "android"))]
+    {
+        palmcode_tools::bash::Session {
+            exec: Arc::new(palmcode_exec::HostExecutor::new()),
+            cwd: workspace_root.to_path_buf(),
+            env: env(std::env::var("PATH").unwrap_or_default()),
+        }
     }
 }
 
+#[cfg(target_os = "android")]
+struct AndroidBashExecutor {
+    shell: PathBuf,
+    farm: PathBuf,
+}
+
+#[cfg(target_os = "android")]
+impl palmcode_exec::Executor for AndroidBashExecutor {
+    fn sh(&self) -> &Path {
+        &self.shell
+    }
+    fn run(
+        &self,
+        spec: &palmcode_exec::ExecSpec,
+        sink: &mut dyn palmcode_exec::OutputSink,
+    ) -> palmcode_exec::Result<palmcode_exec::ExecResult> {
+        let shell = userland::prepare(self_lib_dir(), &self.farm, &mut userland::NativeOps)
+            .map_err(palmcode_exec::Error::Spawn)?;
+        palmcode_exec::NativeProcExecutor::new(shell, spec.env.clone()).run(spec, sink)
+    }
+}
 /// Directory of this shared library (== the native lib dir on Android).
-#[cfg(unix)]
+#[cfg(target_os = "android")]
 fn self_lib_dir() -> Option<PathBuf> {
     unsafe {
         let mut info: libc::Dl_info = std::mem::zeroed();
@@ -1723,41 +1746,6 @@ fn self_lib_dir() -> Option<PathBuf> {
         }
         let path = std::ffi::CStr::from_ptr(info.dli_fname).to_str().ok()?;
         Some(Path::new(path).parent()?.to_path_buf())
-    }
-}
-
-#[cfg(unix)]
-fn ensure_userland_symlink(target: &Path, link: &Path) {
-    if let Ok(current) = std::fs::read_link(link) {
-        if current == target {
-            return;
-        }
-        if std::fs::remove_file(link).is_err() {
-            return;
-        }
-    }
-    let _ = std::os::unix::fs::symlink(target, link);
-}
-
-#[cfg(all(test, unix))]
-mod userland_link_tests {
-    #[test]
-    fn refreshes_dangling_links_after_apk_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old-libbusybox.so");
-        let new = dir.path().join("new-libbusybox.so");
-        let link = dir.path().join("sh");
-        std::fs::write(&old, "old").unwrap();
-        std::fs::write(&new, "new").unwrap();
-        super::ensure_userland_symlink(&old, &link);
-        std::fs::remove_file(&old).unwrap();
-
-        super::ensure_userland_symlink(&new, &link);
-        assert_eq!(std::fs::read_link(&link).unwrap(), new);
-        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
-
-        super::ensure_userland_symlink(&new, &link);
-        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
     }
 }
 

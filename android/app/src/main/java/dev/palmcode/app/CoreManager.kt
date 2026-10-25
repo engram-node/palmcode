@@ -74,6 +74,8 @@ class Approval(
 object AppState {
     var screen by mutableStateOf<Screen>(Screen.Setup)
     var providerCleartext by mutableStateOf(false)
+    var userlandReady by mutableStateOf(false)
+    var userlandMessage by mutableStateOf("")
     val sessions = mutableStateListOf<SessionInfo>()
     val approvals = mutableStateListOf<Approval>()
     /** "Accept edits for this session" toggle state, per session id. */
@@ -184,6 +186,10 @@ object AppState {
                     }
                     is CoreEvent.ApprovalResolved -> approvals.removeAll { it.requestId == e.requestId }
                     is CoreEvent.AutoApproveEdits -> e.sessionId?.let { acceptEdits[it] = e.on }
+                    is CoreEvent.UserlandStatus -> {
+                        userlandReady = e.ok
+                        userlandMessage = e.message
+                    }
                 }
             }
         }
