@@ -392,3 +392,49 @@ CI check; local A/B verification covered BusyBox binaries.
   run-as but disables JVM optimization; native Rust remains release-built.
 - PENDING: actual 50-turn execution, phase/OVERHEAD timing and run-as launch
   on device. No mock or gateway traffic was generated in this session.
+
+## Stage 2 curated userland and final gates (2026-10-25)
+
+- DONE: BusyBox builds from checksum-verified source with 125 applets on
+  both ABIs. Compiled dispatch tables match the allowlist and generated
+  Rust catalog. Shell syntax and catalog regeneration checks pass.
+- DONE: catalog estimate is 719 -> 205 tokens for the applet-name list
+  (characters / 4, rounded up). This is not a tokenizer measurement.
+- DONE: stripped BusyBox sizes: arm64-v8a 990968 -> 338944 bytes;
+  x86_64 986784 -> 333760 bytes. See ADR 0024.
+- DONE: observed universal debug APK before/after curation:
+  66477869 -> 66476122 bytes. This is a whole-build comparison, not an
+  isolated BusyBox size experiment; other stage code/artifacts also changed.
+  Final unsigned universal release APK: 21367546 bytes; bench: 39209178 bytes.
+- DONE: `cargo fmt --all --check`, workspace/all-target Clippy with warnings
+  denied, `cargo test --workspace --no-run`, and `cargo deny check` pass.
+  Deny required access to its existing advisory-database lock outside the
+  sandbox; advisories, bans, licenses and sources all passed.
+- PARTIAL: 161 workspace tests passed with exec excluded and `crash_tests`
+  plus `timeout_kills_the_tree_fast` skipped. Provider environment variables
+  were removed from the test process; no live gateway tests were enabled.
+- UNRUN for acceptance: exec tests used `--test-threads=1` and a 60-second
+  cap. `cancel_stops_the_run` reported a failure before the suite stalled
+  at `timeout_kills_tree_including_grandchildren`. The test/cargo processes
+  were terminated; nested shell descendants resisted Windows termination.
+  Maintainer must run the complete exec/crash/timeout checks outside this
+  sandbox. Do not interpret the partial run as a pass.
+- DONE: `assembleDebug`, `assembleBench`, `assembleRelease`, release vital
+  lint, `testDebugUnitTest` (5 tests) and `testBenchUnitTest` (6 tests) pass.
+  A final bench-only rebuild/test also passes after pending-Stop handling.
+  Thirteen new logical tests were added: seven Rust and six JVM tests.
+- DONE: main-thread submission no longer blocks foreground-service startup;
+  Stop during submission is retained until native submission returns.
+  A JVM regression covers cancellation-state renewal (ADR 0025).
+- UNRUN: gitleaks was absent from PATH, so commit-hook secret scans were
+  skipped. No history scan was attempted.
+- PARTIAL: no Android runtime behavior is claimed. All device checks,
+  including notification actions, wake locks, Doze/app standby, live bash
+  scrolling/Kill, self-test and benchmark execution, remain PENDING for
+  the maintainer. No adb, UI tapping, screenshots or gateway runs were used.
+- Cuts/risks: unattended approval deliberately retains prompts for unknown
+  and recursive/directory effects; Kill stops the entire turn and resets
+  cached grants; bash is same-UID execution. Non-exported bench launch via
+  direct shell am-start is unavailable; the run-as alternative is unverified
+  and debuggable bench disables JVM optimization. M2/M3 acceptance is not
+  complete. Deferred work was not changed and nothing was pushed.

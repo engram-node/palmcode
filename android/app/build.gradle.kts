@@ -237,7 +237,8 @@ val userlandBuild = tasks.register<Exec>("userlandBuild") {
     group = "build"
     description = "Cross-build busybox/ripgrep/git from source (needs bash+make; MSYS2 on Windows, system tools on Linux CI)"
     val outDir = layout.buildDirectory.dir("userland")
-    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"))
+    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"),
+        rootProject.file("userland/busybox-applets.txt"), rootProject.file("core/exec/src/applets.rs"))
     outputs.dir(outDir)
     outputs.cacheIf { true }
     environment("NDK_HOME", ndkDir.absolutePath)
