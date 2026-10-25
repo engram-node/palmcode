@@ -61,6 +61,8 @@ fun SetupScreen(onSaved: () -> Unit) {
     var fastModel by remember { mutableStateOf(store.fastModel) }
 
     var probing by remember { mutableStateOf(false) }
+    var testingUserland by remember { mutableStateOf(false) }
+    var diagnostics by remember { mutableStateOf("Self-test has not run") }
     var probe by remember { mutableStateOf<ProbeReportRecord?>(null) }
     var probeError by remember { mutableStateOf<String?>(null) }
     var advanced by remember { mutableStateOf(false) }
@@ -89,6 +91,18 @@ fun SetupScreen(onSaved: () -> Unit) {
         }
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
         AppearanceSection()
+        Text("Diagnostics", style = MaterialTheme.typography.titleLarge)
+        Text(diagnostics, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(enabled = !testingUserland, onClick = {
+            testingUserland = true
+            scope.launch {
+                diagnostics = withContext(Dispatchers.IO) {
+                    runCatching { dev.palmcode.core.userlandSelfTest().message }
+                        .getOrDefault("Self-test unavailable")
+                }
+                testingUserland = false
+            }
+        }) { Text(if (testingUserland) "Testing…" else "Re-run self-test") }
         Text("Provider", style = MaterialTheme.typography.titleLarge)
 
         if (cleartext) {

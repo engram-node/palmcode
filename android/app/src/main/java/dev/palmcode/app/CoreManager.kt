@@ -51,7 +51,7 @@ class ChatMsg(val id: Long, val role: String) {
     val tools = mutableStateListOf<ToolCard>()
 }
 
-/** A tool call in flight or done (live events only; not rehydrated). */
+/** A tool call restored from storage or updated by live events. */
 class ToolCard(val id: String, val name: String, val path: String?) {
     var done by mutableStateOf(false)
     var ok by mutableStateOf(false)
@@ -100,6 +100,15 @@ object AppState {
                 m.streaming = t.streaming
                 m.interrupted = t.interrupted
                 m.error = t.error
+                for (c in t.tools) {
+                    m.tools.add(ToolCard(c.id, c.name, c.path).also {
+                        it.done = c.status != "pending"
+                        it.ok = c.status == "done"
+                        it.durationMs = c.durationMs.toLong()
+                        it.preview = c.output
+                        if (c.name == "bash") it.liveOutput = c.output
+                    })
+                }
                 if (t.tokens > 0u) m.completionTokens = t.tokens.toLong()
                 list.add(m)
             }
@@ -166,6 +175,7 @@ object AppState {
                             c.ok = e.ok
                             c.durationMs = e.durationMs.toLong()
                             c.preview = e.preview
+                            if (c.name == "bash") c.liveOutput = e.preview
                         }
                     }
                     is CoreEvent.ToolOutput -> find(e.sessionId, e.messageId)?.let { m ->

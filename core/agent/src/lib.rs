@@ -258,6 +258,46 @@ pub struct TranscriptItem {
     pub streaming: bool,
     pub tokens: u32,
     pub error: Option<String>,
+    pub tools: Vec<TranscriptTool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptTool {
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub status: String,
+    pub duration_ms: u64,
+    pub output: String,
+}
+
+fn transcript_tool(t: palmcode_store::StoredToolCall) -> TranscriptTool {
+    let path = if t.name == "bash" {
+        serde_json::from_str::<serde_json::Value>(&t.args)
+            .ok()
+            .and_then(|v| {
+                v.get("command")?
+                    .as_str()
+                    .map(|s| s.chars().take(120).collect())
+            })
+    } else {
+        primary_path(&t.args)
+    };
+    let output = if t.status == "interrupted" {
+        "interrupted, outcome unknown".into()
+    } else {
+        let text = t.output.unwrap_or_default();
+        let start = text.char_indices().rev().nth(8191).map_or(0, |(i, _)| i);
+        text[start..].to_string()
+    };
+    TranscriptTool {
+        id: t.id,
+        name: t.name,
+        path,
+        status: t.status,
+        duration_ms: t.duration_ms.max(0) as u64,
+        output,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -773,7 +813,18 @@ impl Engine {
 
     pub fn transcript(&self, session_id: &str) -> Result<Vec<TranscriptItem>, EngineError> {
         let rows = self.store.transcript(session_id)?;
-        Ok(rows.iter().map(|(m, parts)| itemize(m, parts)).collect())
+        rows.iter()
+            .map(|(m, parts)| {
+                let mut item = itemize(m, parts);
+                item.tools = self
+                    .store
+                    .tool_calls_for(m.id)?
+                    .into_iter()
+                    .map(transcript_tool)
+                    .collect();
+                Ok(item)
+            })
+            .collect()
     }
 
     /// Queue a user message and stream the assistant reply. Returns the
@@ -951,6 +1002,9 @@ impl Engine {
     /// select!, closing the connection; the partial message is marked
     /// interrupted and stays visible.
     pub fn stop(&self, session_id: &str) -> Result<(), EngineError> {
+        if let Some(ctx) = self.tools.lock().unwrap().remove(session_id) {
+            ctx.cancel.cancel();
+        }
         let sender = self.rt.block_on(self.inflight.lock()).remove(session_id);
         match sender {
             Some(tx) => {
@@ -1035,6 +1089,41 @@ impl Engine {
     pub fn shutdown(&self) {
         self.emitter.flush();
     }
+
+    pub fn userland_self_test(&self) -> (bool, String) {
+        #[cfg(target_os = "android")]
+        {
+            let root = self.spill_base.join("selftest");
+            let check = || -> Result<(), String> {
+                std::fs::create_dir_all(&root).map_err(|_| "cannot create self-test directory")?;
+                let session = bash_session(&root, &root);
+                let spill = palmcode_tools::Spiller::new(&root)
+                    .map_err(|_| "cannot create self-test spill")?;
+                let cancel = palmcode_exec::Cancel::default();
+                let ctx = palmcode_tools::bash::BashCtx {
+                    session: &session,
+                    cancel: &cancel,
+                    sink: std::cell::RefCell::new(None),
+                };
+                let out = palmcode_tools::bash::run(
+                    r#"{"command":"printf palmcode-selftest && rg --version && git --version","timeout_ms":10000}"#,
+                    &ctx, &spill,
+                ).map_err(|_| "userland self-test execution failed")?;
+                if !out.text.contains("palmcode-selftest") || !out.text.contains("[exit 0") {
+                    return Err("userland self-test returned an unsuccessful status".into());
+                }
+                Ok(())
+            };
+            match check() {
+                Ok(()) => (true, "Shell, ripgrep and git self-test passed".into()),
+                Err(message) => (false, message),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            (false, "Packaged userland self-test requires Android".into())
+        }
+    }
 }
 
 fn summary(s: &StoredSession) -> SessionSummary {
@@ -1069,6 +1158,7 @@ fn itemize(m: &StoredMessage, parts: &[StoredPart]) -> TranscriptItem {
             .iter()
             .find(|p| p.kind == "error")
             .map(|p| p.content.clone()),
+        tools: Vec::new(),
     }
 }
 
@@ -1663,7 +1753,17 @@ async fn execute_calls(
             call_id: c.id.clone(),
             ok: !is_error,
             duration_ms: dur,
-            preview: preview(&text),
+            preview: if c.name == "bash" {
+                text.chars()
+                    .rev()
+                    .take(8192)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            } else {
+                preview(&text)
+            },
         });
         results.push(CallResult {
             call: c.clone(),
@@ -2272,6 +2372,77 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_cancels_bash_and_next_turn_gets_a_fresh_token() {
+        struct Ignore;
+        impl EventSink for Ignore {
+            fn on_batch(&self, _: Vec<Event>) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::start(&dir.path().join("test.db"), Arc::new(Ignore)).unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        engine.set_workspace(root.to_str().unwrap()).unwrap();
+        let old = engine.tools_ctx("session").unwrap();
+        assert!(!old.cancel.is_cancelled());
+        engine.stop("session").unwrap();
+        assert!(old.cancel.is_cancelled());
+        let next = engine.tools_ctx("session").unwrap();
+        assert!(!next.cancel.is_cancelled());
+        assert!(!Arc::ptr_eq(&old, &next));
+    }
+
+    #[test]
+    fn persisted_cards_preserve_all_tool_kinds_and_bound_unicode_output() {
+        for name in ["read", "write", "edit", "bash"] {
+            let card = transcript_tool(palmcode_store::StoredToolCall {
+                id: name.into(),
+                session_id: "s".into(),
+                message_id: 1,
+                name: name.into(),
+                args: r#"{"path":"src/file","command":"echo hi"}"#.into(),
+                status: "done".into(),
+                started_at: Some(1),
+                finished_at: Some(2),
+                duration_ms: 123,
+                output: Some("界".repeat(9000)),
+                spill_path: None,
+            });
+            assert_eq!(card.name, name);
+            assert_eq!(card.status, "done");
+            assert_eq!(card.duration_ms, 123);
+            assert_eq!(card.output.chars().count(), 8192);
+            assert_eq!(
+                card.path.as_deref(),
+                Some(if name == "bash" {
+                    "echo hi"
+                } else {
+                    "src/file"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_card_does_not_present_stale_output_as_success() {
+        let card = transcript_tool(palmcode_store::StoredToolCall {
+            id: "c".into(),
+            session_id: "s".into(),
+            message_id: 1,
+            name: "bash".into(),
+            args: "invalid".into(),
+            status: "interrupted".into(),
+            started_at: None,
+            finished_at: None,
+            duration_ms: -1,
+            output: Some("partial".into()),
+            spill_path: None,
+        });
+        assert_eq!(card.output, "interrupted, outcome unknown");
+        assert_eq!(card.duration_ms, 0);
+        assert_eq!(card.path, None);
+    }
 
     #[test]
     fn bash_tap_flushes_on_timer_and_on_exit() {

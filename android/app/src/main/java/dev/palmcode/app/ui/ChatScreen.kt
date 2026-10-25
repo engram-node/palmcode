@@ -1,12 +1,14 @@
 package dev.palmcode.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -207,7 +209,7 @@ private fun MessageBubble(sessionId: String, msg: ChatMsg) {
                     Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    for (card in msg.tools) ToolCardView(card)
+                    for (card in msg.tools) ToolCardView(sessionId, card)
                 }
             }
             msg.error?.let { err ->
@@ -279,7 +281,7 @@ private fun MetricsLine(msg: ChatMsg) {
 }
 
 @Composable
-private fun ToolCardView(card: ToolCard) {
+private fun ToolCardView(sessionId: String, card: ToolCard) {
     val styles = LocalContentStyles.current
     val failed = card.done && !card.ok
     var expanded by remember(card.id) { mutableStateOf(false) }
@@ -313,6 +315,22 @@ private fun ToolCardView(card: ToolCard) {
                     style = MaterialTheme.typography.labelMedium,
                     color = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
                 )
+            }
+            if (card.name == "bash") {
+                BashOutput(card)
+                if (!card.done) {
+                    TextButton(onClick = { CoreManager.stop(sessionId) }) {
+                        Text("Kill (stops turn)")
+                    }
+                }
+                if (card.done) {
+                    val status = card.preview.lineSequence().lastOrNull { it.startsWith("[") }
+                    Surface(shape = RoundedCornerShape(8.dp)) {
+                        Text(status ?: if (card.ok) "Finished" else "Failed / interrupted",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(4.dp))
+                    }
+                }
             }
             if (expanded) {
                 if (card.preview.isNotEmpty()) {
@@ -357,6 +375,27 @@ private fun ToolCardView(card: ToolCard) {
             }
         }
     }
+}
+
+@Composable
+private fun BashOutput(card: ToolCard) {
+    val lines = remember(card.liveOutput) { card.liveOutput.takeLast(8192).split('\n') }
+    val state = rememberLazyListState()
+    var follow by remember(card.id) { mutableStateOf(true) }
+    val dragged by state.interactionSource.collectIsDraggedAsState()
+    LaunchedEffect(dragged) {
+        if (dragged) follow = false
+    }
+    LaunchedEffect(card.liveOutput, follow) {
+        if (follow && lines.isNotEmpty()) state.scrollToItem(lines.lastIndex)
+    }
+    LazyColumn(state = state, modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp)) {
+        items(lines) { line ->
+            Text(line, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (!follow) TextButton(onClick = { follow = true }) { Text("Follow output") }
 }
 
 @Composable

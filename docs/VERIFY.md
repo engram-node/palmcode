@@ -328,3 +328,15 @@ CI check; local A/B verification covered BusyBox binaries.
 - UNRUN: the full tools test run stalled in process execution in this
   sandbox and was stopped. No Android behavior was exercised.
 - PENDING: device checks remain with the maintainer.
+
+## Stage 2 tool cards (2026-10-25)
+
+- DONE: transcript responses restore persisted tool cards for every tool;
+  output tails are capped at 8192 Unicode characters. Three regressions cover
+  card projection, interrupted status, and Stop cancellation/token renewal.
+- DONE: agent/FFI clippy with warnings denied; eight non-crash agent unit
+  tests and the FFI unit test pass. Tools checks are recorded above.
+- PARTIAL: bash cards render a lazy capped output list, status, duration and
+  a Kill action; Kill stops the turn and clears cached session grants.
+- PARTIAL: Settings can rerun a ten-second packaged-userland smoke test.
+  Android compilation is in progress; device behavior remains PENDING.
