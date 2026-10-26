@@ -333,24 +333,30 @@ impl Client {
             retry_after: None,
         };
         let body = builder::body_bytes(req).map_err(no_ra)?;
+        let dispatch = palmcode_telemetry::Phase::start("dispatch");
+        let request = self
+            .authed(self.http.post(format!("{}/chat/completions", self.base)))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .build()
+            .map_err(|e| no_ra(self.net_err(e)))?;
+        let send = self.http.execute(request);
+        drop(dispatch);
         let t0 = Instant::now();
         // first-token budget covers EVERYTHING up to the first SSE byte:
         // connect, request write, response headers, server prefill time.
         // connect() itself is additionally capped at CONNECT_TIMEOUT.
-        let response = tokio::time::timeout(
-            self.timeouts.first_token,
-            self.authed(self.http.post(format!("{}/chat/completions", self.base)))
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            no_ra(LlmError::FirstTokenTimeout(
-                self.timeouts.first_token.as_secs(),
-            ))
-        })?
-        .map_err(|e| no_ra(self.net_err(e)))?;
+        let response = {
+            let _phase = palmcode_telemetry::Phase::start("connect");
+            tokio::time::timeout(self.timeouts.first_token, send)
+                .await
+                .map_err(|_| {
+                    no_ra(LlmError::FirstTokenTimeout(
+                        self.timeouts.first_token.as_secs(),
+                    ))
+                })?
+                .map_err(|e| no_ra(self.net_err(e)))?
+        };
 
         let status = response.status();
         if !status.is_success() {

@@ -104,7 +104,11 @@ pub fn build_body(req: &ChatRequest) -> Result<serde_json::Value, LlmError> {
 }
 
 pub fn body_bytes(req: &ChatRequest) -> Result<Vec<u8>, LlmError> {
-    let body = build_body(req)?;
+    let body = {
+        let _phase = palmcode_telemetry::Phase::start("request_build");
+        build_body(req)?
+    };
+    let _phase = palmcode_telemetry::Phase::start("serialize");
     serde_json::to_vec(&body).map_err(|e| LlmError::BadJson(e.to_string()))
 }
 

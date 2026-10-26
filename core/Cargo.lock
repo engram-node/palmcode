@@ -1107,6 +1107,7 @@ dependencies = [
  "palmcode-llm",
  "palmcode-perms",
  "palmcode-store",
+ "palmcode-telemetry",
  "palmcode-tools",
  "serde",
  "serde_json",
@@ -1160,6 +1161,7 @@ name = "palmcode-llm"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "palmcode-telemetry",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
@@ -1188,11 +1190,16 @@ dependencies = [
 name = "palmcode-store"
 version = "0.1.0"
 dependencies = [
+ "palmcode-telemetry",
  "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "palmcode-telemetry"
+version = "0.1.0"
 
 [[package]]
 name = "palmcode-tools"

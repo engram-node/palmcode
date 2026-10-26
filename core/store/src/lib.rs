@@ -8,8 +8,13 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 
+mod writer;
+pub use writer::Store;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("store writer: {0}")]
+    Writer(String),
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
@@ -80,7 +85,7 @@ pub struct StoredWorkspace {
     pub trusted: bool,
 }
 
-pub struct Store {
+struct DbStore {
     conn: Mutex<Connection>,
 }
 
@@ -191,13 +196,14 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-impl Store {
+impl DbStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "busy_timeout", 5000u32)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
@@ -209,6 +215,7 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self {
@@ -292,7 +299,7 @@ impl Store {
         streaming: bool,
     ) -> Result<i64, StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "INSERT INTO messages(session_id, role, created_at, streaming) VALUES (?1,?2,?3,?4)",
             params![session, role, now_ms(), streaming as i32],
@@ -324,7 +331,7 @@ impl Store {
         content: &str,
     ) -> Result<i64, StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM parts WHERE message_id=?1 AND kind=?2 ORDER BY id DESC LIMIT 1",
@@ -376,7 +383,7 @@ impl Store {
         interrupted: bool,
     ) -> Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "UPDATE messages SET streaming=0, interrupted=?1, tokens=?2 WHERE id=?3",
             params![interrupted as i32, tokens, message_id],

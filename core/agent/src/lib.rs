@@ -1097,6 +1097,7 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        let _ = self.store.flush();
         self.emitter.flush();
     }
 
@@ -1242,7 +1243,7 @@ async fn stream_once(
                 ClientEvent::Text(t) => {
                     if !reasoning_closed && !full_reasoning.is_empty() {
                         // reasoning part closes when the answer starts
-                        let _ = engine.store.put_part(
+                        let _ = engine.store.enqueue_part(
                             session_id,
                             message_id,
                             "reasoning",
@@ -1260,7 +1261,7 @@ async fn stream_once(
                     if last_snapshot_write.elapsed() >= SNAPSHOT_INTERVAL {
                         let _ = engine
                             .store
-                            .put_part(session_id, message_id, "text", full_text);
+                            .enqueue_part(session_id, message_id, "text", full_text);
                         last_snapshot_write = Instant::now();
                     }
                 }
@@ -1416,156 +1417,165 @@ async fn run_turn(task: TurnTask) {
     // on non-debuggable apps (ro.debuggable=0 phones) — logcat via liblog.
     let mut last_stream_end: Option<Instant> = None;
 
-    let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
-        iterations += 1;
-        if iterations > MAX_TOOL_ITERATIONS {
-            break Err(LlmError::BadJson(format!(
-                "tool loop exceeded {MAX_TOOL_ITERATIONS} iterations (runaway guard)"
-            )));
-        }
-        if cancel_rx.is_terminated() {
-            cancelled = true;
-            break Err(LlmError::Cancelled);
-        }
-        // hard guard: (roughly) full context -> stop before the model does
-        let bpt = engine.ema_bpt(&cfg.main_model);
-        if estimate_tokens(&api_messages, bpt) as f64
-            >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
-        {
-            break Err(LlmError::BadJson(format!(
-                "context guard: estimated usage reached {:.0}% of {} tokens - \
+    let outcome: std::result::Result<_, LlmError> =
+        loop {
+            iterations += 1;
+            if iterations > MAX_TOOL_ITERATIONS {
+                break Err(LlmError::BadJson(format!(
+                    "tool loop exceeded {MAX_TOOL_ITERATIONS} iterations (runaway guard)"
+                )));
+            }
+            if cancel_rx.is_terminated() {
+                cancelled = true;
+                break Err(LlmError::Cancelled);
+            }
+            // hard guard: (roughly) full context -> stop before the model does
+            let bpt = engine.ema_bpt(&cfg.main_model);
+            if estimate_tokens(&api_messages, bpt) as f64
+                >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
+            {
+                break Err(LlmError::BadJson(format!(
+                    "context guard: estimated usage reached {:.0}% of {} tokens - \
                  start a new session",
-                CONTEXT_GUARD_FRACTION * 100.0,
-                cfg.context_window
-            )));
-        }
-
-        let max_tokens = engine
-            .turn_overrides
-            .lock()
-            .unwrap()
-            .max_output_tokens
-            .unwrap_or(cfg.max_output_tokens);
-        let request = ChatRequest {
-            model: cfg.main_model.clone(),
-            messages: api_messages.clone(),
-            max_tokens,
-            continuous_usage: cfg.continuous_usage,
-            sampling: cfg.sampling.clone(),
-            extra_body: cfg.extra_body.clone(),
-            tools: schemas.clone(),
-        };
-
-        if let Some(t) = last_stream_end {
-            alog(&format!(
-                "OVERHEAD turn_gap_ms={} iter={iterations}",
-                t.elapsed().as_millis()
-            ));
-        }
-        let flow = stream_once(
-            engine,
-            &session_id,
-            message_id,
-            &client,
-            &request,
-            &mut Merge {
-                text: &mut full_text,
-                reasoning: &mut full_reasoning,
-                cancel_rx: &mut cancel_rx,
-            },
-        )
-        .await;
-        last_stream_end = Some(Instant::now());
-
-        if first_ttft.is_none() {
-            first_ttft = flow.ttft;
-        }
-        if let Some(u) = flow.usage {
-            saw_usage = true;
-            total_completion += u.completion_tokens as u64;
-            total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
-            if let Some(c) = u.cached_tokens {
-                // keep the LAST call's cached count (not a sum): the final
-                // request carries the whole history, so its ratio is the
-                // honest "prefix cache effectiveness at turn end"
-                total_cached = Some(c as u64);
+                    CONTEXT_GUARD_FRACTION * 100.0,
+                    cfg.context_window
+                )));
             }
-            // G: calibrate the bytes/token EMA from real usage
-            engine.note_usage_sample(
-                &cfg.main_model,
-                wire_bytes(&request),
-                u.prompt_tokens as u64,
-            );
-        }
-        cancelled |= flow.cancelled;
 
-        let out = match flow.outcome {
-            Ok(o) => o,
-            Err(e) => break Err(e),
-        };
+            let max_tokens = engine
+                .turn_overrides
+                .lock()
+                .unwrap()
+                .max_output_tokens
+                .unwrap_or(cfg.max_output_tokens);
+            let request_build = palmcode_telemetry::Phase::start("request_build");
+            let request = ChatRequest {
+                model: cfg.main_model.clone(),
+                messages: api_messages.clone(),
+                max_tokens,
+                continuous_usage: cfg.continuous_usage,
+                sampling: cfg.sampling.clone(),
+                extra_body: cfg.extra_body.clone(),
+                tools: schemas.clone(),
+            };
+            drop(request_build);
 
-        let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
-        match (wants_tools, &tools) {
-            (true, Some(ctx)) => {
-                if !full_text.ends_with('\n') && !full_text.is_empty() {
-                    full_text.push('\n');
-                }
-                if !full_reasoning.is_empty() {
-                    let _ = engine.store.put_part(
-                        &session_id,
-                        message_id,
-                        "reasoning",
-                        &full_reasoning,
-                    );
-                }
-                if !full_text.is_empty() {
-                    let _ = engine
-                        .store
-                        .put_part(&session_id, message_id, "text", &full_text);
-                }
-                // wire view: assistant with tool calls, then results in order
-                api_messages.push(Message::assistant_tool_calls(flow.tool_calls.clone(), None));
-                if cancel_rx.is_terminated() {
-                    cancelled = true;
-                    break Err(LlmError::Cancelled);
-                }
-                let results =
-                    execute_calls(engine, ctx, &session_id, message_id, flow.tool_calls).await;
-                for r in results {
-                    api_messages.push(Message::tool(r.call.id, r.content));
-                }
-                // loop for the next model turn
-                continue;
+            if let Some(t) = last_stream_end {
+                alog(&format!(
+                    "OVERHEAD turn_gap_us={} iter={iterations}",
+                    t.elapsed().as_micros()
+                ));
             }
-            (true, None) => {
-                // model emitted tool calls with no workspace/tools on
-                let note = "requested tool calls but no workspace is connected; \
+            let flow = stream_once(
+                engine,
+                &session_id,
+                message_id,
+                &client,
+                &request,
+                &mut Merge {
+                    text: &mut full_text,
+                    reasoning: &mut full_reasoning,
+                    cancel_rx: &mut cancel_rx,
+                },
+            )
+            .await;
+            last_stream_end = Some(Instant::now());
+
+            if first_ttft.is_none() {
+                first_ttft = flow.ttft;
+            }
+            if let Some(u) = flow.usage {
+                saw_usage = true;
+                total_completion += u.completion_tokens as u64;
+                total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
+                if let Some(c) = u.cached_tokens {
+                    // keep the LAST call's cached count (not a sum): the final
+                    // request carries the whole history, so its ratio is the
+                    // honest "prefix cache effectiveness at turn end"
+                    total_cached = Some(c as u64);
+                }
+                // G: calibrate the bytes/token EMA from real usage
+                engine.note_usage_sample(
+                    &cfg.main_model,
+                    wire_bytes(&request),
+                    u.prompt_tokens as u64,
+                );
+            }
+            cancelled |= flow.cancelled;
+
+            let out = match flow.outcome {
+                Ok(o) => o,
+                Err(e) => break Err(e),
+            };
+
+            let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
+            match (wants_tools, &tools) {
+                (true, Some(ctx)) => {
+                    if !full_text.ends_with('\n') && !full_text.is_empty() {
+                        full_text.push('\n');
+                    }
+                    if !full_reasoning.is_empty() {
+                        let _ = engine.store.enqueue_part(
+                            &session_id,
+                            message_id,
+                            "reasoning",
+                            &full_reasoning,
+                        );
+                    }
+                    if !full_text.is_empty() {
+                        let _ =
+                            engine
+                                .store
+                                .enqueue_part(&session_id, message_id, "text", &full_text);
+                    }
+                    // wire view: assistant with tool calls, then results in order
+                    api_messages.push(Message::assistant_tool_calls(flow.tool_calls.clone(), None));
+                    if cancel_rx.is_terminated() {
+                        cancelled = true;
+                        break Err(LlmError::Cancelled);
+                    }
+                    let results =
+                        match execute_calls(engine, ctx, &session_id, message_id, flow.tool_calls)
+                            .await
+                        {
+                            Ok(results) => results,
+                            Err(reason) => break Err(LlmError::BadJson(reason)),
+                        };
+                    for r in results {
+                        api_messages.push(Message::tool(r.call.id, r.content));
+                    }
+                    // loop for the next model turn
+                    continue;
+                }
+                (true, None) => {
+                    // model emitted tool calls with no workspace/tools on
+                    let note = "requested tool calls but no workspace is connected; \
                             answering without tools";
-                full_text.push_str(&format!("\n\n_{note}_\n"));
-                engine.emitter.emit(Event::TextDelta {
-                    seq: engine.next_seq(),
-                    session_id: session_id.clone(),
-                    message_id,
-                    snapshot: full_text.clone(),
-                });
-                break Ok(out);
+                    full_text.push_str(&format!("\n\n_{note}_\n"));
+                    engine.emitter.emit(Event::TextDelta {
+                        seq: engine.next_seq(),
+                        session_id: session_id.clone(),
+                        message_id,
+                        snapshot: full_text.clone(),
+                    });
+                    break Ok(out);
+                }
+                (false, _) => break Ok(out),
             }
-            (false, _) => break Ok(out),
-        }
-    };
+        };
 
     // final persistence — after EVERY closed part
     if !full_reasoning.is_empty() {
         let _ = engine
             .store
-            .put_part(&session_id, message_id, "reasoning", &full_reasoning);
+            .enqueue_part(&session_id, message_id, "reasoning", &full_reasoning);
     }
     match outcome {
         Ok(out) => {
             if !full_text.is_empty() {
                 let _ = engine
                     .store
-                    .put_part(&session_id, message_id, "text", &full_text);
+                    .enqueue_part(&session_id, message_id, "text", &full_text);
             }
             let completion = u32::try_from(total_completion).unwrap_or(u32::MAX);
             // suppress silly values: decode windows < 250 ms have no rhythm
@@ -1577,24 +1587,36 @@ async fn run_turn(task: TurnTask) {
                     None
                 }
             });
-            let _ = engine
-                .store
-                .finalize_message(&session_id, message_id, completion, false);
-            engine.emitter.emit_now(Event::MessageFinished {
-                seq: engine.next_seq(),
-                session_id: session_id.clone(),
-                message_id,
-                finish_reason: out.finish_reason,
-                ttft_ms: first_ttft.map(|d| d.as_millis() as u64),
-                decode_tps,
-                prompt_tokens: if saw_usage {
-                    total_prompt.map(|v| u32::try_from(v).unwrap_or(u32::MAX))
-                } else {
-                    None
-                },
-                completion_tokens: if saw_usage { Some(completion) } else { None },
-                cached_tokens: total_cached.map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
-            });
+            let persisted =
+                engine
+                    .store
+                    .finalize_message(&session_id, message_id, completion, false);
+            if persisted.is_err() {
+                engine.emitter.emit_now(Event::TurnError {
+                    seq: engine.next_seq(),
+                    session_id: session_id.clone(),
+                    message_id: Some(message_id),
+                    code: "PersistenceFailed".into(),
+                    detail: "Turn could not be committed; reopen the session before continuing"
+                        .into(),
+                });
+            } else {
+                engine.emitter.emit_now(Event::MessageFinished {
+                    seq: engine.next_seq(),
+                    session_id: session_id.clone(),
+                    message_id,
+                    finish_reason: out.finish_reason,
+                    ttft_ms: first_ttft.map(|d| d.as_millis() as u64),
+                    decode_tps,
+                    prompt_tokens: if saw_usage {
+                        total_prompt.map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                    } else {
+                        None
+                    },
+                    completion_tokens: if saw_usage { Some(completion) } else { None },
+                    cached_tokens: total_cached.map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+                });
+            }
         }
         Err(e) => {
             let is_cancel = matches!(e, LlmError::Cancelled) || cancelled;
@@ -1650,7 +1672,7 @@ async fn execute_calls(
     session_id: &str,
     message_id: i64,
     calls: Vec<palmcode_llm::types::ToolCallSpec>,
-) -> Vec<CallResult> {
+) -> Result<Vec<CallResult>, String> {
     struct Approved {
         spec: palmcode_llm::types::ToolCallSpec,
         rel: String,
@@ -1682,11 +1704,27 @@ async fn execute_calls(
 
     // Persistence: every call gets a row (pending) before any execution, so a
     // crash mid-batch marks everything unfinished (never silently re-run).
-    for c in &calls {
-        let _ =
-            engine
-                .store
-                .tool_call_started(session_id, message_id, &c.id, &c.name, &c.arguments);
+    let records: Vec<_> = calls
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone(), c.arguments.clone()))
+        .collect();
+    if engine
+        .store
+        .tool_calls_started(session_id, message_id, &records)
+        .is_err()
+    {
+        for c in &calls {
+            engine.emitter.emit_now(Event::ToolFinished {
+                seq: engine.next_seq(),
+                session_id: session_id.into(),
+                message_id,
+                call_id: c.id.clone(),
+                ok: false,
+                duration_ms: 0,
+                preview: "Persistence unavailable; tool was not executed".into(),
+            });
+        }
+        return Err("tool intent could not be committed; nothing executed".into());
     }
 
     // Execution: (text, is_error, duration_ms, spill_path)
@@ -1749,13 +1787,10 @@ async fn execute_calls(
         let (text, is_error, dur, spill) =
             out.unwrap_or_else(|| ("error: internal tool failure".into(), true, 0, None));
         alog(&format!("TOOL name={} ms={} err={}", c.name, dur, is_error));
-        let _ = engine.store.tool_call_finished(
-            &c.id,
-            !is_error,
-            Some(&text),
-            spill.as_deref(),
-            dur as i64,
-        );
+        engine
+            .store
+            .tool_call_finished(&c.id, !is_error, Some(&text), spill.as_deref(), dur as i64)
+            .map_err(|_| "tool outcome could not be committed; outcome unknown".to_string())?;
         engine.emitter.emit_now(Event::ToolFinished {
             seq: engine.next_seq(),
             session_id: session_id.to_string(),
@@ -1780,7 +1815,7 @@ async fn execute_calls(
             content: text,
         });
     }
-    results
+    Ok(results)
 }
 
 /// Bash runtime wiring (deliverable B/D): on Android the packaged userland
@@ -2013,23 +2048,8 @@ fn preview(text: &str) -> String {
 /// Bench/measurement logging that actually reaches logcat on production
 /// phones: ART routes app stdout only for debuggable apps, so println! is
 /// /dev/null on our release builds. Direct liblog FFI — no subscriber dep.
-#[cfg(target_os = "android")]
 fn alog(msg: &str) {
-    use std::ffi::{c_char, c_int};
-    #[link(name = "log")]
-    unsafe extern "C" {
-        fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
-    }
-    let tag = std::ffi::CString::new("palmcode").unwrap();
-    let text = std::ffi::CString::new(msg)
-        .unwrap_or_else(|_| std::ffi::CString::new("palmcode: message contained NUL").unwrap());
-    // 4 = INFO
-    unsafe { __android_log_write(4, tag.as_ptr(), text.as_ptr()) };
-}
-
-#[cfg(not(target_os = "android"))]
-fn alog(msg: &str) {
-    println!("{msg}");
+    palmcode_telemetry::alog(msg);
 }
 
 /// Ask/deny/resolution for one call. Emits ToolStarted on Allow (execution
@@ -2382,6 +2402,39 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistence_failure_prevents_tool_execution() {
+        struct Ignore;
+        impl EventSink for Ignore {
+            fn on_batch(&self, _: Vec<Event>) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::start(&dir.path().join("test.db"), Arc::new(Ignore)).unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        engine.set_workspace(root.to_str().unwrap()).unwrap();
+        let ctx = engine.tools_ctx("s").unwrap();
+        ctx.perms.set_accept_edits_for_session();
+        engine
+            .store
+            .enqueue_part("missing", i64::MAX, "text", "invalid")
+            .unwrap();
+        assert!(engine.store.flush().is_err());
+        let result = engine.rt.block_on(execute_calls(
+            &engine,
+            &ctx,
+            "s",
+            1,
+            vec![palmcode_llm::types::ToolCallSpec {
+                id: "write".into(),
+                name: "write".into(),
+                arguments: r#"{"path":"must-not-exist","content":"data"}"#.into(),
+            }],
+        ));
+        assert!(result.is_err());
+        assert!(!root.join("must-not-exist").exists());
+    }
 
     #[test]
     fn stop_cancels_bash_and_next_turn_gets_a_fresh_token() {
