@@ -294,12 +294,25 @@ impl Client {
         req: &ChatRequest,
         tx: mpsc::UnboundedSender<ClientEvent>,
     ) -> Result<TurnOutcome, LlmError> {
+        self.chat_with_gap(req, tx, None).await
+    }
+
+    /// Optional tool-stream origin; the gap ends after serialization at dispatch.
+    pub async fn chat_with_gap(
+        &self,
+        req: &ChatRequest,
+        tx: mpsc::UnboundedSender<ClientEvent>,
+        gap_start: Option<Instant>,
+    ) -> Result<TurnOutcome, LlmError> {
         let started = Instant::now();
         let mut backoff = BACKOFF.iter().copied();
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.chat_attempt(req, &tx).await {
+            match self
+                .chat_attempt(req, &tx, if attempt == 1 { gap_start } else { None })
+                .await
+            {
                 Ok(mut out) => {
                     out.retries = attempt - 1;
                     out.elapsed = started.elapsed();
@@ -327,6 +340,7 @@ impl Client {
         &self,
         req: &ChatRequest,
         tx: &mpsc::UnboundedSender<ClientEvent>,
+        gap_start: Option<Instant>,
     ) -> Result<TurnOutcome, AttemptError> {
         let no_ra = |err| AttemptError {
             err,
@@ -342,6 +356,12 @@ impl Client {
             .map_err(|e| no_ra(self.net_err(e)))?;
         let send = self.http.execute(request);
         drop(dispatch);
+        if let Some(start) = gap_start {
+            palmcode_telemetry::alog(&format!(
+                "OVERHEAD turn_gap_us={}",
+                start.elapsed().as_micros()
+            ));
+        }
         let t0 = Instant::now();
         // first-token budget covers EVERYTHING up to the first SSE byte:
         // connect, request write, response headers, server prefill time.

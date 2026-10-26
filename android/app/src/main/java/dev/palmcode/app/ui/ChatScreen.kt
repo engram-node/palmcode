@@ -185,7 +185,7 @@ fun ChatScreen(sessionId: String) {
 }
 
 @Composable
-private fun MessageBubble(sessionId: String, msg: ChatMsg) {
+internal fun MessageBubble(sessionId: String, msg: ChatMsg) {
     val styles = LocalContentStyles.current
     if (msg.role == "user") {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {

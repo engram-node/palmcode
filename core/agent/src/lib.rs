@@ -1217,13 +1217,14 @@ async fn stream_once(
     message_id: i64,
     client: &Client,
     request: &ChatRequest,
+    gap_start: Option<Instant>,
     acc: &mut Merge<'_>,
 ) -> IterationFlow {
     let full_text = &mut *acc.text;
     let full_reasoning = &mut *acc.reasoning;
     let cancel_rx = &mut *acc.cancel_rx;
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientEvent>();
-    let chat = client.chat(request, tx);
+    let chat = client.chat_with_gap(request, tx, gap_start);
     tokio::pin!(chat);
 
     let mut reasoning_closed = false;
@@ -1460,18 +1461,13 @@ async fn run_turn(task: TurnTask) {
             };
             drop(request_build);
 
-            if let Some(t) = last_stream_end {
-                alog(&format!(
-                    "OVERHEAD turn_gap_us={} iter={iterations}",
-                    t.elapsed().as_micros()
-                ));
-            }
             let flow = stream_once(
                 engine,
                 &session_id,
                 message_id,
                 &client,
                 &request,
+                last_stream_end,
                 &mut Merge {
                     text: &mut full_text,
                     reasoning: &mut full_reasoning,

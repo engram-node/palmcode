@@ -13,6 +13,8 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.Bundle
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import dev.palmcode.app.PalmcodeCore
 import dev.palmcode.core.*
@@ -36,7 +38,9 @@ class BenchActivity : Activity() {
         val url = intent.getStringExtra("url").orEmpty()
         val turns = intent.getIntExtra("turns", 50)
         if (BenchArgs.valid(url, turns)) {
-            startForegroundService(Intent(this, BenchService::class.java).putExtra("url", url).putExtra("turns", turns))
+            val ui = intent.getBooleanExtra("ui", false)
+            if (ui) startActivity(Intent(this, BenchUiActivity::class.java))
+            startForegroundService(Intent(this, BenchService::class.java).putExtra("url", url).putExtra("turns", turns).putExtra("ui", ui))
         } else Log.i("palmcode", "PHASE rejected_arguments")
         finish()
     }
@@ -48,8 +52,13 @@ class BenchService : Service() {
     @Volatile private var session: String? = null
     @Volatile private var stopping = false
     private var wake: PowerManager.WakeLock? = null
+    private var showUi = false
+    private val main = Handler(Looper.getMainLooper())
     private val listener = object : CoreEventListener {
-        override fun onEvents(batch: List<CoreEvent>) { batch.forEach { events.offer(it) } }
+        override fun onEvents(batch: List<CoreEvent>) {
+            batch.forEach { events.offer(it) }
+            if (showUi) main.post { dev.palmcode.app.AppState.apply(batch) }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -62,6 +71,7 @@ class BenchService : Service() {
             return START_NOT_STICKY
         }
         if (running) return START_NOT_STICKY
+        showUi = intent?.getBooleanExtra("ui", false) ?: false
         val url = intent?.getStringExtra("url").orEmpty()
         val turns = intent?.getIntExtra("turns", 50) ?: 50
         if (!BenchArgs.valid(url, turns)) {
@@ -103,14 +113,17 @@ class BenchService : Service() {
                 firstTokenSecs = 30u, idleSecs = 30u,
             ))
             val workspace = File(filesDir, "bench-workspace").also { check(it.mkdirs() || it.isDirectory) }
+            File(workspace, "benchmark.txt").writeText("benchmark\n")
             workspaceSet(workspace.absolutePath)
             alog("PHASE configured turns=$turns")
             repeat(turns) { index ->
                 check(!stopping)
                 val id = sessionsCreate("Benchmark turn").id
                 session = id
+                if (showUi) main.post { BenchUiState.session = id }
                 events.clear()
                 val start = SystemClock.elapsedRealtime()
+                alog("PHASE benchmark_turn_start=${index + 1}")
                 messageSend(id, "Run the scripted workspace task.")
                 check(!stopping) { "stopped during submission" }
                 val deadline = start + 600_000
@@ -134,11 +147,13 @@ class BenchService : Service() {
             }
             // Fine-grained OVERHEAD lines are emitted by the Rust agent's alog.
             alog("PHASE complete turns=$turns")
+            BenchRunState.success = true
         } catch (_: Exception) {
             session?.let { turnStop(it) }
             alog("PHASE failed")
         } finally {
             coreShutdown()
+            BenchRunState.done.countDown()
             stopSelf()
         }
     }

@@ -390,8 +390,9 @@ CI check; local A/B verification covered BusyBox binaries.
 - Cut: direct shell am-start cannot launch a non-exported activity. ADR 0023
   documents a run-as alternative, not device-verified. Debuggable enables
   run-as but disables JVM optimization; native Rust remains release-built.
-- PENDING: actual 50-turn execution, phase/OVERHEAD timing and run-as launch
-  on device. No mock or gateway traffic was generated in this session.
+- DONE in Stage 3: scripted device execution and phase/OVERHEAD timing via
+  bench-only instrumentation; see BENCHMARKS.md. Run-as remains unverified.
+  No mock or gateway traffic was generated during the Stage 2 session.
 
 ## Stage 2 curated userland and final gates (2026-10-25)
 
@@ -428,13 +429,62 @@ CI check; local A/B verification covered BusyBox binaries.
   A JVM regression covers cancellation-state renewal (ADR 0025).
 - UNRUN: gitleaks was absent from PATH, so commit-hook secret scans were
   skipped. No history scan was attempted.
-- PARTIAL: no Android runtime behavior is claimed. All device checks,
+- PARTIAL: Stage 2 claimed no Android runtime behavior. Manual device checks,
   including notification actions, wake locks, Doze/app standby, live bash
-  scrolling/Kill, self-test and benchmark execution, remain PENDING for
-  the maintainer. No adb, UI tapping, screenshots or gateway runs were used.
+  scrolling/Kill and self-test remain PENDING for the maintainer. Benchmark
+  execution was subsequently measured in Stage 3. No adb, UI tapping,
+  screenshots or gateway runs were used during the Stage 2 session.
 - Cuts/risks: unattended approval deliberately retains prompts for unknown
   and recursive/directory effects; Kill stops the entire turn and resets
   cached grants; bash is same-UID execution. Non-exported bench launch via
   direct shell am-start is unavailable; the run-as alternative is unverified
   and debuggable bench disables JVM optimization. M2/M3 acceptance is not
   complete. Deferred work was not changed and nothing was pushed.
+
+## Stage 3 persistence, phases and device benchmark (2026-10-26)
+
+- DONE: one SQLite writer owns the connection, with a bounded FIFO queue
+  and batched commits. Cumulative streaming snapshots enqueue; durable
+  tool-intent, result and terminal barriers retain event ordering. A failed
+  write batch rolls back and fails closed until reopen. WAL and synchronous
+  FULL retain committed power-loss durability (ADR 0026).
+- DONE: numeric Android alog spans cover persist, request build, serialize,
+  connect/response headers and dispatch. The corrected OVERHEAD endpoint
+  includes serialization; connect is not a pure TCP-handshake span (ADR 0027).
+- DONE: bench-only instrumentation launches the private activity without
+  taps. `gradlew.bat :android:app:assembleBench :android:app:testBenchUnitTest`
+  passes. Packaged release DEX was inspected and contains no BenchActivity,
+  BenchService, BenchUiActivity or BenchInstrumentation.
+- DONE: attached-device mock runs and text-only gfxinfo collection are
+  recorded with exact commands, raw per-turn samples and artifact hashes
+  in BENCHMARKS.md and results/stage3-*.json. Both required headless runs
+  pass the overhead budget. No performance optimization iteration was needed.
+- PARTIAL: current and legacy gfxinfo jank counters disagree. Both are
+  preserved; no unqualified jank acceptance is claimed. The UI workload uses
+  read-tool cards and synthetic paced text, not live bash output. No gateway,
+  provider key, screenshot, UI tapping or global device setting change was used.
+- DONE: new tests cover writer FIFO/reopen recovery, atomic rollback and
+  sticky failure, queue backpressure/worker ownership, FULL/WAL pragmas,
+  and preventing tool execution after intent-persistence failure. The
+  benchmark parser self-test covers quantiles, phase sums, missing samples,
+  out-of-order/overlapping turns, missing tools and duplicate gaps:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -SelfTest`.
+- DONE: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --no-run`, and `cargo deny check` passed during
+  the stage. Final formatting and Clippy were repeated after the timing fix.
+- PARTIAL: final `cargo test --workspace --exclude palmcode-exec -- --test-threads=1 --skip crash_tests --skip timeout_kills_the_tree_fast`
+  passes all 166 selected tests and doctests; three tests were filtered.
+  Provider environment variables were removed from the test process. An
+  earlier overlapping host build produced a missing-crate doctest error;
+  this final serial test run completed successfully.
+- DONE: final `gradlew.bat :android:app:assembleDebug :android:app:assembleRelease :android:app:testDebugUnitTest :android:app:lintVitalRelease`
+  passes; the corrected benchmark APK build/unit-test gate also passes.
+- UNRUN for acceptance: `cargo test -p palmcode-exec -- --test-threads=1`
+  hit its 60-second cap. Cancellation failed before the process-tree timeout
+  stalled. Nested shell descendants resisted Windows termination. Complete
+  exec/crash/timeout validation remains for the maintainer outside this sandbox.
+- UNRUN: gitleaks is absent from PATH; no history scan was attempted.
+- PENDING: all maintainer manual notification/approval, wake-lock, Doze/app
+  standby, live bash scrolling/Kill and self-test checks remain unchanged.
+  Run-as launch is unverified. M2/M3 acceptance remains partial until those
+  and the sandbox-blocked checks pass. Deferred work remains untouched.

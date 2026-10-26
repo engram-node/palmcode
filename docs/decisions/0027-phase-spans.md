@@ -19,3 +19,9 @@ OVERHEAD remains the end-of-tool-stream to next-request-dispatch gap. It
 includes tool and permission work but excludes the next request's network
 wait. Phase totals cover all requests in a turn, so they must not be summed
 and presented as that single gap. Timing logs add their own small overhead.
+
+The inherited timer ended at the agent's stream call, before the client's
+serialization. For final Stage 3 measurements, pass its origin into the
+client and end it after request serialization and reqwest dispatch. Log
+the first attempt only; retries have their own phase samples. Retain older
+samples as pre-dispatch diagnostics and exclude them from the final budget.

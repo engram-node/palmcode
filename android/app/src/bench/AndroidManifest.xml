@@ -5,5 +5,9 @@
             android:exported="false" android:theme="@android:style/Theme.NoDisplay" />
         <service android:name="dev.palmcode.bench.BenchService"
             android:exported="false" android:foregroundServiceType="dataSync" />
+        <activity android:name="dev.palmcode.bench.BenchUiActivity"
+            android:exported="false" />
     </application>
+    <instrumentation android:name="dev.palmcode.bench.BenchInstrumentation"
+        android:targetPackage="dev.palmcode.bench" android:functionalTest="true" />
 </manifest>

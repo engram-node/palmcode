@@ -15,6 +15,72 @@ const LONG_PREFILL: &[u8] = include_bytes!("../../llm/fixtures/vllm/long_prefill
 async fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "overhead".into());
     match mode.as_str() {
+        "stage3" => {
+            let arg = |i| std::env::args().nth(i);
+            let turns: usize = arg(2).and_then(|v| v.parse().ok()).unwrap_or(50);
+            let port: u16 = arg(3).and_then(|v| v.parse().ok()).unwrap_or(8787);
+            let tps: f64 = arg(4).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            assert!((1..=1000).contains(&turns) && (tps == 0.0 || (1.0..=1000.0).contains(&tps)));
+            let frame = b"data: {\"choices\":[{\"delta\":{\"content\":\"x \"}}]}\n\n";
+            let mut body = Vec::new();
+            for _ in 0..if tps > 0.0 { 300 } else { 1 } {
+                body.extend_from_slice(frame);
+            }
+            body.extend_from_slice(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+            let mut scripts = Vec::new();
+            let run_nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            for turn in 0..turns {
+                scripts.push(ChatScript {
+                    body: String::from_utf8(include_bytes!("../fixtures/stage3-read.sse").to_vec())
+                        .expect("fixture")
+                        .replace(
+                            "\"id\":\"read\"",
+                            &format!("\"id\":\"r{run_nonce:x}-{turn}\""),
+                        )
+                        .into_bytes(),
+                    ..Default::default()
+                });
+                scripts.push(ChatScript {
+                    body: body.clone(),
+                    chunk_size: if tps > 0.0 { frame.len() } else { 0 },
+                    inter_chunk_delay: if tps > 0.0 {
+                        Duration::from_secs_f64(1.0 / tps)
+                    } else {
+                        Duration::ZERO
+                    },
+                    ..Default::default()
+                });
+            }
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+            listener.set_nonblocking(true).expect("nonblocking");
+            let server = serve_on(
+                tokio::net::TcpListener::from_std(listener).expect("listener"),
+                MockConfig {
+                    scripts,
+                    tokenize_status: 403,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("mock");
+            println!("stage3 mock ready turns={turns} tps={tps}");
+            let mut reported = 0;
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let spans = server.stream_spans.lock().unwrap();
+                while reported < spans.len() {
+                    println!(
+                        "MOCK_STREAM n={} us={}",
+                        reported,
+                        spans[reported].as_micros()
+                    );
+                    reported += 1;
+                }
+            }
+        }
         "overhead" => overhead().await,
         "serve" => {
             let arg = |i: usize| std::env::args().nth(i);
