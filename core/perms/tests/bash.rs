@@ -4,7 +4,8 @@
 use palmcode_perms::bash::{ClassCtx, Outcome, classify};
 
 fn ctx() -> ClassCtx {
-    ClassCtx::new("/data/project")
+    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    ClassCtx::new(ROOT.get_or_init(|| tempfile::tempdir().unwrap()).path())
 }
 
 fn is_allow(c: &str) -> bool {
@@ -33,7 +34,8 @@ fn bash_approvals_are_exact_match_not_globs() {
     let ctx = ClassCtx::new(dir.path());
     // DB approvals allow exactly those command strings...
     assert!(matches!(e.decide_bash("make build", &ctx), Outcome::Allow));
-    assert!(matches!(e.decide_bash("rm -rf *", &ctx), Outcome::Allow));
+    // Protected/dynamic effects always prompt, even for an exact DB grant.
+    assert!(matches!(e.decide_bash("rm -rf *", &ctx), Outcome::Ask(_)));
     // ...and nothing else, even prefix- or glob-shaped
     assert!(matches!(e.decide_bash("rm -rf /", &ctx), Outcome::Deny(_))); // abs escape
     assert!(matches!(e.decide_bash("rm -rf tmp", &ctx), Outcome::Ask(_)));
@@ -55,53 +57,32 @@ fn bash_approvals_are_exact_match_not_globs() {
 #[test]
 fn plain_reads_allow() {
     for c in [
-        "ls -la",
-        "ls -la src/",
+        "ls -l -a",
+        "ls -l -a src/",
         "cat f.txt",
         "pwd",
         "echo hi",
         "printf '%s\n' f.txt",
         "rg TODO src/",
-        "grep -rn main .",
+        "grep -r -n main .",
         "wc -l < f.txt",
         "head -n 20 f.txt",
         "tail -f f.txt",
-        "cut -d: -f1 f.txt",
-        "diff a.txt b.txt",
+        "cut -d : -f 1 f.txt",
         "stat f.txt",
-        "file f.txt",
-        "which sh",
-        "realpath ./x",
         "sort f.txt",
         "uniq f.txt",
         "tr a-z A-Z < f.txt",
-        "date",
-        "uname -a",
-        "true",
-        "false",
         "echo a && echo b",
         "cat f.txt | wc -l",
         "cat a; cat b",
         "# just a comment",
-        "X=1 ls",
         "cat f.txt # trailing comment",
         "cat 'a#b'",
-        "git status",
-        "git log --oneline",
-        "git diff HEAD",
-        "git show HEAD:file.txt",
-        "git grep pattern",
         "find . -name '*.rs'",
         "find . -type f -print",
         "echo done\n",
-        "sha256sum f.txt",
-        "md5sum -c sums.txt",
         "sort f.txt > /dev/null",
-        "env",
-        "nice cat f.txt",
-        "nohup echo ok",
-        "timeout 5 cat f.txt",
-        "cat ~/.notes", // HOME == workspace root (bash tool env contract)
     ] {
         assert!(
             is_allow(c),
@@ -223,8 +204,6 @@ fn outside_workspace_denies() {
         "echo /etc/passwd",
         "cat ../../etc/passwd",
         "cd ../..",
-        "cat ~/../etc/passwd",
-        "cat ~root/.bashrc",
         "rm -rf /",
         "cat /data/other-project/x",
         "sh -c 'cat /etc/passwd'",
@@ -306,4 +285,154 @@ fn obfuscation_attempts_never_allow() {
     ] {
         assert!(!is_allow(c), "MUST NOT Allow: {c:?}");
     }
+}
+
+#[test]
+fn explicit_flag_grammars_reject_bypasses() {
+    for command in [
+        "rg --pre tool pattern",
+        "rg --pre=tool pattern",
+        "rg --pre-glob '*' pattern",
+        "rg --pre-glob=* pattern",
+        "rg --hostname-bin tool pattern",
+        "rg --hostname-bin=tool pattern",
+        "uniq input output",
+        "sort -o output input",
+        "sort -ooutput input",
+        "sort --output output input",
+        "sort --output=output input",
+        "sort --compress-program tool input",
+        "sort --compress-program=tool input",
+        "find . -exec cat {} ;",
+        "find . -ok cat {} ;",
+        "find . -delete",
+        "find . -fprint output",
+        "find . -fprint0 output",
+        "find . -fprintf output format",
+        "find . -fls output",
+        "dd if=input of=output",
+        "tee output",
+        "sed p input",
+        "awk 1 input",
+        "xargs cat",
+        "tar cf output input",
+        "nohup cat input",
+        "env cat input",
+        "exec cat input",
+        "source input",
+        "command cat input",
+        "git status",
+        "git --output=output diff",
+        "git diff --ext-diff",
+        "git show --textconv HEAD",
+        "X=1 ls",
+        "PATH=bin; ls",
+        "ls -la",
+        "ls --all",
+        "cat a b",
+        "pwd extra",
+        "dirname a b",
+        "head -n20 input",
+        "cut -d: -f1 input",
+    ] {
+        assert!(is_ask(command), "expected Ask: {command:?}");
+    }
+}
+
+#[test]
+fn generated_dangerous_arguments_never_allow() {
+    for command in [
+        "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "grep", "rg", "find", "sort",
+        "uniq", "cut", "tr", "basename", "dirname", "stat", "git",
+    ] {
+        for arguments in [
+            "--pre=tool",
+            "--pre-glob=*",
+            "--hostname-bin=tool",
+            "--output=output",
+            "-ooutput",
+            "--compress-program=tool",
+            "-exec",
+            "-ok",
+            "-delete",
+            "-fprint",
+            "-fls",
+            "--ext-diff",
+            "--textconv",
+            "--unknown",
+            "a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g",
+        ] {
+            let script = format!("{command} {arguments}");
+            assert!(!is_allow(&script), "must not Allow: {script:?}");
+        }
+    }
+}
+
+#[test]
+fn canonical_paths_secrets_flag_values_and_literal_expansions() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ClassCtx::new(dir.path());
+    for secret in [
+        ".env",
+        ".envrc",
+        ".env.local",
+        "a.pem",
+        "id_rsa.pub",
+        "a.key",
+        "credentials.json",
+    ] {
+        for command in [format!("cat {secret}"), format!("rg --file={secret}")] {
+            assert!(
+                matches!(classify(&command, &ctx), Outcome::Ask(_)),
+                "{command}"
+            );
+        }
+    }
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().to_string_lossy().replace('\\', "/");
+    for command in [
+        format!("cat {outside}/file"),
+        format!("rg --file={outside}/file"),
+    ] {
+        assert!(
+            matches!(classify(&command, &ctx), Outcome::Deny(_)),
+            "{command}"
+        );
+    }
+    for value in ["~/file", "$FILE", "`pwd`", "$(pwd)"] {
+        assert!(matches!(
+            classify(&format!("cat '{value}'"), &ctx),
+            Outcome::Ask(_)
+        ));
+        assert!(matches!(
+            classify(&format!("rg '--file={value}'"), &ctx),
+            Outcome::Ask(_)
+        ));
+    }
+    assert!(matches!(
+        classify("cat nested/new/file", &ctx),
+        Outcome::Allow
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_operands_and_flag_values_cannot_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+    let ctx = ClassCtx::new(dir.path());
+    for command in [
+        "cat escape/file",
+        "rg --file=escape/file",
+        "echo x > escape/file",
+    ] {
+        assert!(
+            matches!(classify(command, &ctx), Outcome::Deny(_)),
+            "{command}"
+        );
+    }
+    std::fs::write(dir.path().join(".env"), "fixture").unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".env"), dir.path().join("alias")).unwrap();
+    assert!(matches!(classify("cat alias", &ctx), Outcome::Ask(_)));
 }

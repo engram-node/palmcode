@@ -18,6 +18,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        resValue("string", "launcher_label", "palmcode")
     }
 
     ndkVersion = ndkVersionPin
@@ -39,6 +40,14 @@ android {
             // Unsigned: F-Droid signs after building. Local verification uses
             // assembleDebug (debug-signed).
         }
+        create("bench") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".bench"
+            resValue("string", "launcher_label", "Palmcode Bench")
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+            matchingFallbacks += "release"
+        }
     }
 
     compileOptions {
@@ -48,6 +57,7 @@ android {
 
     buildFeatures {
         compose = true
+        resValues = true
     }
 
     packaging {
@@ -72,6 +82,15 @@ android {
         named("release") {
             jniLibs.directories += "build/rust/release/jniLibs"
         }
+        named("bench") {
+            jniLibs.directories += "build/rust/release/jniLibs"
+        }
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().withBuildType("bench")) {
+        it.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true
     }
 }
 
@@ -221,7 +240,8 @@ val userlandBuild = tasks.register<Exec>("userlandBuild") {
     group = "build"
     description = "Cross-build busybox/ripgrep/git from source (needs bash+make; MSYS2 on Windows, system tools on Linux CI)"
     val outDir = layout.buildDirectory.dir("userland")
-    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"))
+    inputs.files(rootProject.file("userland/build.sh"), rootProject.file("userland/versions.env"),
+        rootProject.file("userland/busybox-applets.txt"), rootProject.file("core/exec/src/applets.rs"))
     outputs.dir(outDir)
     outputs.cacheIf { true }
     environment("NDK_HOME", ndkDir.absolutePath)
@@ -256,6 +276,7 @@ tasks.named("preBuild") {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)

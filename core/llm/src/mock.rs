@@ -293,9 +293,10 @@ async fn handle(
         script.body.chunks(script.chunk_size).collect()
     };
     let stream_t0 = Instant::now();
-    for p in pieces {
+    for (index, p) in pieces.into_iter().enumerate() {
         if script.inter_chunk_delay > Duration::ZERO {
-            tokio::time::sleep(script.inter_chunk_delay).await;
+            let deadline = stream_t0 + script.inter_chunk_delay.mul_f64((index + 1) as f64);
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
         }
         if sock.write_all(p).await.is_err() {
             disconnected.store(true, Ordering::SeqCst);

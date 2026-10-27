@@ -76,6 +76,17 @@ pub struct TranscriptItemRecord {
     pub streaming: bool,
     pub tokens: u32,
     pub error: Option<String>,
+    pub tools: Vec<TranscriptToolRecord>,
+}
+
+#[derive(uniffi::Record)]
+pub struct TranscriptToolRecord {
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub status: String,
+    pub duration_ms: u64,
+    pub output: String,
 }
 
 #[derive(uniffi::Record)]
@@ -202,6 +213,11 @@ pub enum CoreEvent {
         seq: u64,
         session_id: Option<String>,
         on: bool,
+    },
+    UserlandStatus {
+        seq: u64,
+        ok: bool,
+        message: String,
     },
 }
 
@@ -405,6 +421,9 @@ impl EventSink for SinkAdapter {
                     session_id,
                     on,
                 },
+                Event::UserlandStatus { seq, ok, message } => {
+                    CoreEvent::UserlandStatus { seq, ok, message }
+                }
             })
             .collect();
         self.0.on_events(mapped);
@@ -515,6 +534,18 @@ pub fn session_transcript(session_id: String) -> Result<Vec<TranscriptItemRecord
             streaming: t.streaming,
             tokens: t.tokens,
             error: t.error,
+            tools: t
+                .tools
+                .into_iter()
+                .map(|c| TranscriptToolRecord {
+                    id: c.id,
+                    name: c.name,
+                    path: c.path,
+                    status: c.status,
+                    duration_ms: c.duration_ms,
+                    output: c.output,
+                })
+                .collect(),
         })
         .collect())
 }
@@ -529,6 +560,18 @@ pub fn message_send(session_id: String, text: String) -> Result<i64, FfiError> {
 #[uniffi::export]
 pub fn turn_stop(session_id: String) {
     let _ = engine().map(|e| e.stop(&session_id));
+}
+
+#[derive(uniffi::Record)]
+pub struct UserlandSelfTestRecord {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[uniffi::export]
+pub fn userland_self_test() -> Result<UserlandSelfTestRecord, FfiError> {
+    let (ok, message) = engine()?.userland_self_test();
+    Ok(UserlandSelfTestRecord { ok, message })
 }
 
 #[uniffi::export]
@@ -549,6 +592,16 @@ pub fn workspace_set(root: String) -> Result<(), FfiError> {
 #[uniffi::export]
 pub fn workspace_current() -> Option<String> {
     engine().ok().and_then(|e| e.workspace())
+}
+
+#[uniffi::export]
+pub fn session_set_unattended_bash(session_id: String, on: bool) -> bool {
+    engine().is_ok_and(|e| e.set_unattended_bash(&session_id, on))
+}
+
+#[uniffi::export]
+pub fn session_unattended_bash_on(session_id: String) -> bool {
+    engine().is_ok_and(|e| e.unattended_bash_on(&session_id))
 }
 
 #[uniffi::export]

@@ -120,6 +120,7 @@ fn send_stream_finish_persist() {
         .iter()
         .map(|e| match e {
             Event::SessionCreated { seq, .. }
+            | Event::UserlandStatus { seq, .. }
             | Event::MessageStarted { seq, .. }
             | Event::TextDelta { seq, .. }
             | Event::ReasoningDelta { seq, .. }

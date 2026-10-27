@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="dev.palmcode.bench.BenchActivity"
+            android:exported="false" android:theme="@android:style/Theme.NoDisplay" />
+        <service android:name="dev.palmcode.bench.BenchService"
+            android:exported="false" android:foregroundServiceType="dataSync" />
+        <activity android:name="dev.palmcode.bench.BenchUiActivity"
+            android:exported="false" />
+    </application>
+    <instrumentation android:name="dev.palmcode.bench.BenchInstrumentation"
+        android:targetPackage="dev.palmcode.bench" android:functionalTest="true" />
+</manifest>

@@ -1,0 +1,4 @@
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"read","type":"function","function":{"name":"read","arguments":"{\"path\":\"benchmark.txt\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

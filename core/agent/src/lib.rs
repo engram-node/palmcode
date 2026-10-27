@@ -17,6 +17,12 @@ use palmcode_llm::types::Message;
 use palmcode_store::{Store, StoredMessage, StoredPart, StoredSession};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
+#[cfg(any(test, target_os = "android"))]
+mod userland;
+
+#[cfg(all(test, not(target_os = "android")))]
+mod crash_tests;
+
 /// Coalesce streaming deltas at most every frame (~60 fps budget).
 const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// Persist a streaming text snapshot at most this often (crash safety
@@ -41,7 +47,7 @@ const SYSTEM_PROMPT_BUILD_GLM: &str = "You are palmcode, a coding agent running 
 # Limits
 - Paths are relative to the workspace root; absolute paths are refused.
 - Never read or modify secret files (.env, *.pem, keys) unless the task explicitly requires it.
-- Bash/shell/git tools are not available in this build; do not attempt them.
+- Use the bash tool for shell commands and git. Permission classification may require approval.
 - If a tool result is an error, adapt and continue; never repeat the identical call.
 
 # Style
@@ -57,7 +63,7 @@ const SYSTEM_PROMPT_BUILD_GENERIC: &str = "You are palmcode, a coding agent runn
 - If a tool result contains a `syntax:` warning or an error, correct it with your next tool call.
 - Independent read-only calls may be batched in one turn; writes are one concern per call.
 - Paths are relative to the workspace root. Never touch secret files (.env, private keys) unless required.
-- No bash/shell/git tools exist in this build.
+- Use the bash tool for shell commands and git. Permission classification may require approval.
 
 # Style
 - Be concise and precise. Report what changed and where. Do not restate file contents.";
@@ -97,7 +103,7 @@ fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>, model:
 /// before the volatile env block so the prompt head stays prefix-cacheable).
 fn command_catalog() -> String {
     format!(
-        "## Commands (shipped in the sandbox)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first.",
+        "## Commands (packaged userland)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Use `git diff --no-ext-diff --no-textconv` for built-in diffs; external diff programs are disabled. Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first. Bash is not a sandbox: approved commands run with the app's UID and can access its files and network. An interrupted command has an unknown outcome; inspect the workspace before deciding whether to retry.",
         palmcode_exec::BUSYBOX_APPLETS.join(" ")
     )
 }
@@ -108,6 +114,11 @@ fn command_catalog() -> String {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    UserlandStatus {
+        seq: u64,
+        ok: bool,
+        message: String,
+    },
     SessionCreated {
         seq: u64,
         session: SessionSummary,
@@ -226,6 +237,19 @@ pub enum Event {
 
 pub trait EventSink: Send + Sync {
     fn on_batch(&self, events: Vec<Event>);
+    /// Optional host diagnostics. Numeric request statistics only; no wire content.
+    fn on_request_metrics(&self, _metrics: RequestMetrics) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestMetrics {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub cached_tokens: Option<u32>,
+    pub ttft_ms: Option<u64>,
+    pub elapsed_ms: u64,
+    pub retries: Option<u32>,
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +271,46 @@ pub struct TranscriptItem {
     pub streaming: bool,
     pub tokens: u32,
     pub error: Option<String>,
+    pub tools: Vec<TranscriptTool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptTool {
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub status: String,
+    pub duration_ms: u64,
+    pub output: String,
+}
+
+fn transcript_tool(t: palmcode_store::StoredToolCall) -> TranscriptTool {
+    let path = if t.name == "bash" {
+        serde_json::from_str::<serde_json::Value>(&t.args)
+            .ok()
+            .and_then(|v| {
+                v.get("command")?
+                    .as_str()
+                    .map(|s| s.chars().take(120).collect())
+            })
+    } else {
+        primary_path(&t.args)
+    };
+    let output = if t.status == "interrupted" {
+        "interrupted, outcome unknown".into()
+    } else {
+        let text = t.output.unwrap_or_default();
+        let start = text.char_indices().rev().nth(8191).map_or(0, |(i, _)| i);
+        text[start..].to_string()
+    };
+    TranscriptTool {
+        id: t.id,
+        name: t.name,
+        path,
+        status: t.status,
+        duration_ms: t.duration_ms.max(0) as u64,
+        output,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +471,8 @@ impl Engine {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let spill_base = db_dir.join("spill");
+        palmcode_exec::enable_subreaper().map_err(|e| EngineError::Tools(e.to_string()))?;
+        palmcode_exec::sweep_spill(&spill_base);
         let engine = Self {
             rt,
             store,
@@ -436,6 +502,21 @@ impl Engine {
         // a tool left "pending" means the app died mid-execution: never
         // re-run; history replay synthesizes an "unknown outcome" result
         engine.store.mark_pending_tools_interrupted()?;
+        #[cfg(target_os = "android")]
+        {
+            let result = userland::prepare(
+                self_lib_dir(),
+                &engine.spill_base.join("userland/bin"),
+                &mut userland::NativeOps,
+            );
+            engine.emitter.emit_now(Event::UserlandStatus {
+                seq: engine.next_seq(),
+                ok: result.is_ok(),
+                message: result
+                    .map(|_| "userland ready".into())
+                    .unwrap_or_else(|message| message),
+            });
+        }
         // tools survive restarts: re-attach the most recently used workspace
         // (validated again — the SAF copy or the path may be gone)
         if let Some(w) = engine
@@ -657,6 +738,16 @@ impl Engine {
         });
     }
 
+    pub fn set_unattended_bash(&self, session_id: &str, on: bool) -> bool {
+        self.tools_ctx(session_id)
+            .is_some_and(|ctx| ctx.perms.set_unattended_bash(on))
+    }
+
+    pub fn unattended_bash_on(&self, session_id: &str) -> bool {
+        self.tools_ctx(session_id)
+            .is_some_and(|ctx| ctx.perms.unattended_bash_on())
+    }
+
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }
@@ -745,7 +836,18 @@ impl Engine {
 
     pub fn transcript(&self, session_id: &str) -> Result<Vec<TranscriptItem>, EngineError> {
         let rows = self.store.transcript(session_id)?;
-        Ok(rows.iter().map(|(m, parts)| itemize(m, parts)).collect())
+        rows.iter()
+            .map(|(m, parts)| {
+                let mut item = itemize(m, parts);
+                item.tools = self
+                    .store
+                    .tool_calls_for(m.id)?
+                    .into_iter()
+                    .map(transcript_tool)
+                    .collect();
+                Ok(item)
+            })
+            .collect()
     }
 
     /// Queue a user message and stream the assistant reply. Returns the
@@ -923,6 +1025,9 @@ impl Engine {
     /// select!, closing the connection; the partial message is marked
     /// interrupted and stays visible.
     pub fn stop(&self, session_id: &str) -> Result<(), EngineError> {
+        if let Some(ctx) = self.tools.lock().unwrap().remove(session_id) {
+            ctx.cancel.cancel();
+        }
         let sender = self.rt.block_on(self.inflight.lock()).remove(session_id);
         match sender {
             Some(tx) => {
@@ -1005,7 +1110,43 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        let _ = self.store.flush();
         self.emitter.flush();
+    }
+
+    pub fn userland_self_test(&self) -> (bool, String) {
+        #[cfg(target_os = "android")]
+        {
+            let root = self.spill_base.join("selftest");
+            let check = || -> Result<(), String> {
+                std::fs::create_dir_all(&root).map_err(|_| "cannot create self-test directory")?;
+                let session = bash_session(&root, &root);
+                let spill = palmcode_tools::Spiller::new(&root)
+                    .map_err(|_| "cannot create self-test spill")?;
+                let cancel = palmcode_exec::Cancel::default();
+                let ctx = palmcode_tools::bash::BashCtx {
+                    session: &session,
+                    cancel: &cancel,
+                    sink: std::cell::RefCell::new(None),
+                };
+                let out = palmcode_tools::bash::run(
+                    r#"{"command":"printf palmcode-selftest && rg --version && git --version","timeout_ms":10000}"#,
+                    &ctx, &spill,
+                ).map_err(|_| "userland self-test execution failed")?;
+                if !out.text.contains("palmcode-selftest") || !out.text.contains("[exit 0") {
+                    return Err("userland self-test returned an unsuccessful status".into());
+                }
+                Ok(())
+            };
+            match check() {
+                Ok(()) => (true, "Shell, ripgrep and git self-test passed".into()),
+                Err(message) => (false, message),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            (false, "Packaged userland self-test requires Android".into())
+        }
     }
 }
 
@@ -1041,6 +1182,7 @@ fn itemize(m: &StoredMessage, parts: &[StoredPart]) -> TranscriptItem {
             .iter()
             .find(|p| p.kind == "error")
             .map(|p| p.content.clone()),
+        tools: Vec::new(),
     }
 }
 
@@ -1088,13 +1230,15 @@ async fn stream_once(
     message_id: i64,
     client: &Client,
     request: &ChatRequest,
+    gap_start: Option<Instant>,
     acc: &mut Merge<'_>,
 ) -> IterationFlow {
+    let request_started = Instant::now();
     let full_text = &mut *acc.text;
     let full_reasoning = &mut *acc.reasoning;
     let cancel_rx = &mut *acc.cancel_rx;
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientEvent>();
-    let chat = client.chat(request, tx);
+    let chat = client.chat_with_gap(request, tx, gap_start);
     tokio::pin!(chat);
 
     let mut reasoning_closed = false;
@@ -1114,7 +1258,7 @@ async fn stream_once(
                 ClientEvent::Text(t) => {
                     if !reasoning_closed && !full_reasoning.is_empty() {
                         // reasoning part closes when the answer starts
-                        let _ = engine.store.put_part(
+                        let _ = engine.store.enqueue_part(
                             session_id,
                             message_id,
                             "reasoning",
@@ -1132,7 +1276,7 @@ async fn stream_once(
                     if last_snapshot_write.elapsed() >= SNAPSHOT_INTERVAL {
                         let _ = engine
                             .store
-                            .put_part(session_id, message_id, "text", full_text);
+                            .enqueue_part(session_id, message_id, "text", full_text);
                         last_snapshot_write = Instant::now();
                     }
                 }
@@ -1175,6 +1319,15 @@ async fn stream_once(
         }
     };
     drop(rx);
+    engine.emitter.sink.on_request_metrics(RequestMetrics {
+        prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+        completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
+        cached_tokens: usage.as_ref().and_then(|u| u.cached_tokens),
+        ttft_ms: ttft.map(|d| d.as_millis() as u64),
+        elapsed_ms: request_started.elapsed().as_millis() as u64,
+        retries: outcome.as_ref().ok().map(|o| o.retries),
+        ok: outcome.is_ok(),
+    });
     IterationFlow {
         outcome,
         tool_calls: accumulator.finish(),
@@ -1288,156 +1441,160 @@ async fn run_turn(task: TurnTask) {
     // on non-debuggable apps (ro.debuggable=0 phones) — logcat via liblog.
     let mut last_stream_end: Option<Instant> = None;
 
-    let outcome: std::result::Result<palmcode_llm::client::TurnOutcome, LlmError> = loop {
-        iterations += 1;
-        if iterations > MAX_TOOL_ITERATIONS {
-            break Err(LlmError::BadJson(format!(
-                "tool loop exceeded {MAX_TOOL_ITERATIONS} iterations (runaway guard)"
-            )));
-        }
-        if cancel_rx.is_terminated() {
-            cancelled = true;
-            break Err(LlmError::Cancelled);
-        }
-        // hard guard: (roughly) full context -> stop before the model does
-        let bpt = engine.ema_bpt(&cfg.main_model);
-        if estimate_tokens(&api_messages, bpt) as f64
-            >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
-        {
-            break Err(LlmError::BadJson(format!(
-                "context guard: estimated usage reached {:.0}% of {} tokens - \
+    let outcome: std::result::Result<_, LlmError> =
+        loop {
+            iterations += 1;
+            if iterations > MAX_TOOL_ITERATIONS {
+                break Err(LlmError::BadJson(format!(
+                    "tool loop exceeded {MAX_TOOL_ITERATIONS} iterations (runaway guard)"
+                )));
+            }
+            if cancel_rx.is_terminated() {
+                cancelled = true;
+                break Err(LlmError::Cancelled);
+            }
+            // hard guard: (roughly) full context -> stop before the model does
+            let bpt = engine.ema_bpt(&cfg.main_model);
+            if estimate_tokens(&api_messages, bpt) as f64
+                >= CONTEXT_GUARD_FRACTION * cfg.context_window as f64
+            {
+                break Err(LlmError::BadJson(format!(
+                    "context guard: estimated usage reached {:.0}% of {} tokens - \
                  start a new session",
-                CONTEXT_GUARD_FRACTION * 100.0,
-                cfg.context_window
-            )));
-        }
-
-        let max_tokens = engine
-            .turn_overrides
-            .lock()
-            .unwrap()
-            .max_output_tokens
-            .unwrap_or(cfg.max_output_tokens);
-        let request = ChatRequest {
-            model: cfg.main_model.clone(),
-            messages: api_messages.clone(),
-            max_tokens,
-            continuous_usage: cfg.continuous_usage,
-            sampling: cfg.sampling.clone(),
-            extra_body: cfg.extra_body.clone(),
-            tools: schemas.clone(),
-        };
-
-        if let Some(t) = last_stream_end {
-            alog(&format!(
-                "OVERHEAD turn_gap_ms={} iter={iterations}",
-                t.elapsed().as_millis()
-            ));
-        }
-        let flow = stream_once(
-            engine,
-            &session_id,
-            message_id,
-            &client,
-            &request,
-            &mut Merge {
-                text: &mut full_text,
-                reasoning: &mut full_reasoning,
-                cancel_rx: &mut cancel_rx,
-            },
-        )
-        .await;
-        last_stream_end = Some(Instant::now());
-
-        if first_ttft.is_none() {
-            first_ttft = flow.ttft;
-        }
-        if let Some(u) = flow.usage {
-            saw_usage = true;
-            total_completion += u.completion_tokens as u64;
-            total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
-            if let Some(c) = u.cached_tokens {
-                // keep the LAST call's cached count (not a sum): the final
-                // request carries the whole history, so its ratio is the
-                // honest "prefix cache effectiveness at turn end"
-                total_cached = Some(c as u64);
+                    CONTEXT_GUARD_FRACTION * 100.0,
+                    cfg.context_window
+                )));
             }
-            // G: calibrate the bytes/token EMA from real usage
-            engine.note_usage_sample(
-                &cfg.main_model,
-                wire_bytes(&request),
-                u.prompt_tokens as u64,
-            );
-        }
-        cancelled |= flow.cancelled;
 
-        let out = match flow.outcome {
-            Ok(o) => o,
-            Err(e) => break Err(e),
-        };
+            let max_tokens = engine
+                .turn_overrides
+                .lock()
+                .unwrap()
+                .max_output_tokens
+                .unwrap_or(cfg.max_output_tokens);
+            let request_build = palmcode_telemetry::Phase::start("request_build");
+            let request = ChatRequest {
+                model: cfg.main_model.clone(),
+                messages: api_messages.clone(),
+                max_tokens,
+                continuous_usage: cfg.continuous_usage,
+                sampling: cfg.sampling.clone(),
+                extra_body: cfg.extra_body.clone(),
+                tools: schemas.clone(),
+            };
+            drop(request_build);
 
-        let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
-        match (wants_tools, &tools) {
-            (true, Some(ctx)) => {
-                if !full_text.ends_with('\n') && !full_text.is_empty() {
-                    full_text.push('\n');
-                }
-                if !full_reasoning.is_empty() {
-                    let _ = engine.store.put_part(
-                        &session_id,
-                        message_id,
-                        "reasoning",
-                        &full_reasoning,
-                    );
-                }
-                if !full_text.is_empty() {
-                    let _ = engine
-                        .store
-                        .put_part(&session_id, message_id, "text", &full_text);
-                }
-                // wire view: assistant with tool calls, then results in order
-                api_messages.push(Message::assistant_tool_calls(flow.tool_calls.clone(), None));
-                if cancel_rx.is_terminated() {
-                    cancelled = true;
-                    break Err(LlmError::Cancelled);
-                }
-                let results =
-                    execute_calls(engine, ctx, &session_id, message_id, flow.tool_calls).await;
-                for r in results {
-                    api_messages.push(Message::tool(r.call.id, r.content));
-                }
-                // loop for the next model turn
-                continue;
+            let flow = stream_once(
+                engine,
+                &session_id,
+                message_id,
+                &client,
+                &request,
+                last_stream_end,
+                &mut Merge {
+                    text: &mut full_text,
+                    reasoning: &mut full_reasoning,
+                    cancel_rx: &mut cancel_rx,
+                },
+            )
+            .await;
+            last_stream_end = Some(Instant::now());
+
+            if first_ttft.is_none() {
+                first_ttft = flow.ttft;
             }
-            (true, None) => {
-                // model emitted tool calls with no workspace/tools on
-                let note = "requested tool calls but no workspace is connected; \
+            if let Some(u) = flow.usage {
+                saw_usage = true;
+                total_completion += u.completion_tokens as u64;
+                total_prompt = Some(u.prompt_tokens as u64); // latest request's prompt size
+                if let Some(c) = u.cached_tokens {
+                    // keep the LAST call's cached count (not a sum): the final
+                    // request carries the whole history, so its ratio is the
+                    // honest "prefix cache effectiveness at turn end"
+                    total_cached = Some(c as u64);
+                }
+                // G: calibrate the bytes/token EMA from real usage
+                engine.note_usage_sample(
+                    &cfg.main_model,
+                    wire_bytes(&request),
+                    u.prompt_tokens as u64,
+                );
+            }
+            cancelled |= flow.cancelled;
+
+            let out = match flow.outcome {
+                Ok(o) => o,
+                Err(e) => break Err(e),
+            };
+
+            let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
+            match (wants_tools, &tools) {
+                (true, Some(ctx)) => {
+                    if !full_text.ends_with('\n') && !full_text.is_empty() {
+                        full_text.push('\n');
+                    }
+                    if !full_reasoning.is_empty() {
+                        let _ = engine.store.enqueue_part(
+                            &session_id,
+                            message_id,
+                            "reasoning",
+                            &full_reasoning,
+                        );
+                    }
+                    if !full_text.is_empty() {
+                        let _ =
+                            engine
+                                .store
+                                .enqueue_part(&session_id, message_id, "text", &full_text);
+                    }
+                    // wire view: assistant with tool calls, then results in order
+                    api_messages.push(Message::assistant_tool_calls(flow.tool_calls.clone(), None));
+                    if cancel_rx.is_terminated() {
+                        cancelled = true;
+                        break Err(LlmError::Cancelled);
+                    }
+                    let results =
+                        match execute_calls(engine, ctx, &session_id, message_id, flow.tool_calls)
+                            .await
+                        {
+                            Ok(results) => results,
+                            Err(reason) => break Err(LlmError::BadJson(reason)),
+                        };
+                    for r in results {
+                        api_messages.push(Message::tool(r.call.id, r.content));
+                    }
+                    // loop for the next model turn
+                    continue;
+                }
+                (true, None) => {
+                    // model emitted tool calls with no workspace/tools on
+                    let note = "requested tool calls but no workspace is connected; \
                             answering without tools";
-                full_text.push_str(&format!("\n\n_{note}_\n"));
-                engine.emitter.emit(Event::TextDelta {
-                    seq: engine.next_seq(),
-                    session_id: session_id.clone(),
-                    message_id,
-                    snapshot: full_text.clone(),
-                });
-                break Ok(out);
+                    full_text.push_str(&format!("\n\n_{note}_\n"));
+                    engine.emitter.emit(Event::TextDelta {
+                        seq: engine.next_seq(),
+                        session_id: session_id.clone(),
+                        message_id,
+                        snapshot: full_text.clone(),
+                    });
+                    break Ok(out);
+                }
+                (false, _) => break Ok(out),
             }
-            (false, _) => break Ok(out),
-        }
-    };
+        };
 
     // final persistence — after EVERY closed part
     if !full_reasoning.is_empty() {
         let _ = engine
             .store
-            .put_part(&session_id, message_id, "reasoning", &full_reasoning);
+            .enqueue_part(&session_id, message_id, "reasoning", &full_reasoning);
     }
     match outcome {
         Ok(out) => {
             if !full_text.is_empty() {
                 let _ = engine
                     .store
-                    .put_part(&session_id, message_id, "text", &full_text);
+                    .enqueue_part(&session_id, message_id, "text", &full_text);
             }
             let completion = u32::try_from(total_completion).unwrap_or(u32::MAX);
             // suppress silly values: decode windows < 250 ms have no rhythm
@@ -1449,24 +1606,36 @@ async fn run_turn(task: TurnTask) {
                     None
                 }
             });
-            let _ = engine
-                .store
-                .finalize_message(&session_id, message_id, completion, false);
-            engine.emitter.emit_now(Event::MessageFinished {
-                seq: engine.next_seq(),
-                session_id: session_id.clone(),
-                message_id,
-                finish_reason: out.finish_reason,
-                ttft_ms: first_ttft.map(|d| d.as_millis() as u64),
-                decode_tps,
-                prompt_tokens: if saw_usage {
-                    total_prompt.map(|v| u32::try_from(v).unwrap_or(u32::MAX))
-                } else {
-                    None
-                },
-                completion_tokens: if saw_usage { Some(completion) } else { None },
-                cached_tokens: total_cached.map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
-            });
+            let persisted =
+                engine
+                    .store
+                    .finalize_message(&session_id, message_id, completion, false);
+            if persisted.is_err() {
+                engine.emitter.emit_now(Event::TurnError {
+                    seq: engine.next_seq(),
+                    session_id: session_id.clone(),
+                    message_id: Some(message_id),
+                    code: "PersistenceFailed".into(),
+                    detail: "Turn could not be committed; reopen the session before continuing"
+                        .into(),
+                });
+            } else {
+                engine.emitter.emit_now(Event::MessageFinished {
+                    seq: engine.next_seq(),
+                    session_id: session_id.clone(),
+                    message_id,
+                    finish_reason: out.finish_reason,
+                    ttft_ms: first_ttft.map(|d| d.as_millis() as u64),
+                    decode_tps,
+                    prompt_tokens: if saw_usage {
+                        total_prompt.map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+                    } else {
+                        None
+                    },
+                    completion_tokens: if saw_usage { Some(completion) } else { None },
+                    cached_tokens: total_cached.map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+                });
+            }
         }
         Err(e) => {
             let is_cancel = matches!(e, LlmError::Cancelled) || cancelled;
@@ -1522,7 +1691,7 @@ async fn execute_calls(
     session_id: &str,
     message_id: i64,
     calls: Vec<palmcode_llm::types::ToolCallSpec>,
-) -> Vec<CallResult> {
+) -> Result<Vec<CallResult>, String> {
     struct Approved {
         spec: palmcode_llm::types::ToolCallSpec,
         rel: String,
@@ -1554,11 +1723,27 @@ async fn execute_calls(
 
     // Persistence: every call gets a row (pending) before any execution, so a
     // crash mid-batch marks everything unfinished (never silently re-run).
-    for c in &calls {
-        let _ =
-            engine
-                .store
-                .tool_call_started(session_id, message_id, &c.id, &c.name, &c.arguments);
+    let records: Vec<_> = calls
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone(), c.arguments.clone()))
+        .collect();
+    if engine
+        .store
+        .tool_calls_started(session_id, message_id, &records)
+        .is_err()
+    {
+        for c in &calls {
+            engine.emitter.emit_now(Event::ToolFinished {
+                seq: engine.next_seq(),
+                session_id: session_id.into(),
+                message_id,
+                call_id: c.id.clone(),
+                ok: false,
+                duration_ms: 0,
+                preview: "Persistence unavailable; tool was not executed".into(),
+            });
+        }
+        return Err("tool intent could not be committed; nothing executed".into());
     }
 
     // Execution: (text, is_error, duration_ms, spill_path)
@@ -1621,13 +1806,10 @@ async fn execute_calls(
         let (text, is_error, dur, spill) =
             out.unwrap_or_else(|| ("error: internal tool failure".into(), true, 0, None));
         alog(&format!("TOOL name={} ms={} err={}", c.name, dur, is_error));
-        let _ = engine.store.tool_call_finished(
-            &c.id,
-            !is_error,
-            Some(&text),
-            spill.as_deref(),
-            dur as i64,
-        );
+        engine
+            .store
+            .tool_call_finished(&c.id, !is_error, Some(&text), spill.as_deref(), dur as i64)
+            .map_err(|_| "tool outcome could not be committed; outcome unknown".to_string())?;
         engine.emitter.emit_now(Event::ToolFinished {
             seq: engine.next_seq(),
             session_id: session_id.to_string(),
@@ -1635,14 +1817,24 @@ async fn execute_calls(
             call_id: c.id.clone(),
             ok: !is_error,
             duration_ms: dur,
-            preview: preview(&text),
+            preview: if c.name == "bash" {
+                text.chars()
+                    .rev()
+                    .take(8192)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            } else {
+                preview(&text)
+            },
         });
         results.push(CallResult {
             call: c.clone(),
             content: text,
         });
     }
-    results
+    Ok(results)
 }
 
 /// Bash runtime wiring (deliverable B/D): on Android the packaged userland
@@ -1653,62 +1845,61 @@ async fn execute_calls(
 fn bash_session(workspace_root: &Path, spill_root: &Path) -> palmcode_tools::bash::Session {
     let tmpdir = spill_root.join("tmp");
     let _ = std::fs::create_dir_all(&tmpdir);
-    let mut extra = std::collections::BTreeMap::new();
-    // git trusts exactly this workspace (never safe.directory=*).
-    extra.insert("GIT_CONFIG_COUNT".into(), "1".into());
-    extra.insert("GIT_CONFIG_KEY_0".into(), "safe.directory".into());
-    extra.insert(
-        "GIT_CONFIG_VALUE_0".into(),
-        workspace_root.display().to_string(),
-    );
     let env = |path: String| palmcode_exec::EnvSpec {
         path,
         home: workspace_root.to_path_buf(),
         tmpdir: tmpdir.clone(),
-        extra: extra.clone(),
+        extra: Default::default(),
     };
 
-    // Android: libbusybox.so / librg.so / libgit.so live in the native lib
-    // dir (jniLibs packaging). Refresh links when an APK update moves the
-    // native lib dir; PATH serves the app-private farm and nothing else.
-    #[cfg(unix)]
-    if let Some(lib_dir) = self_lib_dir() {
-        let busybox = lib_dir.join("libbusybox.so");
-        if busybox.is_file() {
-            let farm = spill_root
-                .parent()
-                .unwrap_or(spill_root)
-                .join("userland")
-                .join("bin");
-            let _ = std::fs::create_dir_all(&farm);
-            for applet in palmcode_exec::BUSYBOX_APPLETS {
-                ensure_userland_symlink(&busybox, &farm.join(applet));
-            }
-            ensure_userland_symlink(&lib_dir.join("librg.so"), &farm.join("rg"));
-            ensure_userland_symlink(&lib_dir.join("libgit.so"), &farm.join("git"));
-            let path = farm.display().to_string();
-            return palmcode_tools::bash::Session {
-                exec: std::sync::Arc::new(palmcode_exec::NativeProcExecutor::new(
-                    farm.join("sh"),
-                    env(path.clone()),
-                )),
-                cwd: workspace_root.to_path_buf(),
-                env: env(path),
-            };
+    #[cfg(target_os = "android")]
+    {
+        let farm = spill_root
+            .parent()
+            .unwrap_or(spill_root)
+            .join("userland/bin");
+        palmcode_tools::bash::Session {
+            exec: Arc::new(AndroidBashExecutor {
+                shell: farm.join("sh"),
+                farm: farm.clone(),
+            }),
+            cwd: workspace_root.to_path_buf(),
+            env: env(farm.display().to_string()),
         }
     }
-
-    let exec = std::sync::Arc::new(palmcode_exec::HostExecutor::new());
-    let path = std::env::var("PATH").unwrap_or_default();
-    palmcode_tools::bash::Session {
-        exec,
-        cwd: workspace_root.to_path_buf(),
-        env: env(path),
+    #[cfg(not(target_os = "android"))]
+    {
+        palmcode_tools::bash::Session {
+            exec: Arc::new(palmcode_exec::HostExecutor::new()),
+            cwd: workspace_root.to_path_buf(),
+            env: env(std::env::var("PATH").unwrap_or_default()),
+        }
     }
 }
 
+#[cfg(target_os = "android")]
+struct AndroidBashExecutor {
+    shell: PathBuf,
+    farm: PathBuf,
+}
+
+#[cfg(target_os = "android")]
+impl palmcode_exec::Executor for AndroidBashExecutor {
+    fn sh(&self) -> &Path {
+        &self.shell
+    }
+    fn run(
+        &self,
+        spec: &palmcode_exec::ExecSpec,
+        sink: &mut dyn palmcode_exec::OutputSink,
+    ) -> palmcode_exec::Result<palmcode_exec::ExecResult> {
+        let shell = userland::prepare(self_lib_dir(), &self.farm, &mut userland::NativeOps)
+            .map_err(palmcode_exec::Error::Spawn)?;
+        palmcode_exec::NativeProcExecutor::new(shell, spec.env.clone()).run(spec, sink)
+    }
+}
 /// Directory of this shared library (== the native lib dir on Android).
-#[cfg(unix)]
+#[cfg(target_os = "android")]
 fn self_lib_dir() -> Option<PathBuf> {
     unsafe {
         let mut info: libc::Dl_info = std::mem::zeroed();
@@ -1721,41 +1912,6 @@ fn self_lib_dir() -> Option<PathBuf> {
         }
         let path = std::ffi::CStr::from_ptr(info.dli_fname).to_str().ok()?;
         Some(Path::new(path).parent()?.to_path_buf())
-    }
-}
-
-#[cfg(unix)]
-fn ensure_userland_symlink(target: &Path, link: &Path) {
-    if let Ok(current) = std::fs::read_link(link) {
-        if current == target {
-            return;
-        }
-        if std::fs::remove_file(link).is_err() {
-            return;
-        }
-    }
-    let _ = std::os::unix::fs::symlink(target, link);
-}
-
-#[cfg(all(test, unix))]
-mod userland_link_tests {
-    #[test]
-    fn refreshes_dangling_links_after_apk_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old-libbusybox.so");
-        let new = dir.path().join("new-libbusybox.so");
-        let link = dir.path().join("sh");
-        std::fs::write(&old, "old").unwrap();
-        std::fs::write(&new, "new").unwrap();
-        super::ensure_userland_symlink(&old, &link);
-        std::fs::remove_file(&old).unwrap();
-
-        super::ensure_userland_symlink(&new, &link);
-        assert_eq!(std::fs::read_link(&link).unwrap(), new);
-        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
-
-        super::ensure_userland_symlink(&new, &link);
-        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
     }
 }
 
@@ -1800,6 +1956,48 @@ impl BashTap {
     }
 }
 
+/// A quiet command still flushes its last short line while it is running.
+struct TimedBashTap {
+    tap: Arc<Mutex<BashTap>>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TimedBashTap {
+    fn new(tap: BashTap) -> Self {
+        let tap = Arc::new(Mutex::new(tap));
+        let timer_tap = tap.clone();
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while matches!(
+                receiver.recv_timeout(Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                timer_tap.lock().unwrap().flush();
+            }
+            timer_tap.lock().unwrap().flush();
+        });
+        Self {
+            tap,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        self.tap.lock().unwrap().push(bytes);
+    }
+}
+
+impl Drop for TimedBashTap {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn bash_tap(
     engine: &Engine,
     session_id: &str,
@@ -1825,10 +2023,10 @@ fn exec_one_owned(
     tap: Option<BashTap>,
 ) -> (String, bool, u64, Option<String>) {
     let t = Instant::now();
-    let mut tap = tap;
+    let tap = tap.map(TimedBashTap::new);
     let out = {
         let mut sink = |chunk: &[u8]| {
-            if let Some(t) = tap.as_mut() {
+            if let Some(t) = tap.as_ref() {
                 t.push(chunk);
             }
         };
@@ -1845,9 +2043,7 @@ fn exec_one_owned(
         };
         palmcode_tools::run_tool(&spec.name, &spec.arguments, &tctx)
     };
-    if let Some(t) = tap.as_mut() {
-        t.flush();
-    }
+    drop(tap);
     let dur = t.elapsed().as_millis() as u64;
     match out {
         Ok(capped) => (
@@ -1871,23 +2067,8 @@ fn preview(text: &str) -> String {
 /// Bench/measurement logging that actually reaches logcat on production
 /// phones: ART routes app stdout only for debuggable apps, so println! is
 /// /dev/null on our release builds. Direct liblog FFI — no subscriber dep.
-#[cfg(target_os = "android")]
 fn alog(msg: &str) {
-    use std::ffi::{c_char, c_int};
-    #[link(name = "log")]
-    unsafe extern "C" {
-        fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
-    }
-    let tag = std::ffi::CString::new("palmcode").unwrap();
-    let text = std::ffi::CString::new(msg)
-        .unwrap_or_else(|_| std::ffi::CString::new("palmcode: message contained NUL").unwrap());
-    // 4 = INFO
-    unsafe { __android_log_write(4, tag.as_ptr(), text.as_ptr()) };
-}
-
-#[cfg(not(target_os = "android"))]
-fn alog(msg: &str) {
-    println!("{msg}");
+    palmcode_telemetry::alog(msg);
 }
 
 /// Ask/deny/resolution for one call. Emits ToolStarted on Allow (execution
@@ -2242,6 +2423,166 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persistence_failure_prevents_tool_execution() {
+        struct Ignore;
+        impl EventSink for Ignore {
+            fn on_batch(&self, _: Vec<Event>) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::start(&dir.path().join("test.db"), Arc::new(Ignore)).unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        engine.set_workspace(root.to_str().unwrap()).unwrap();
+        let ctx = engine.tools_ctx("s").unwrap();
+        ctx.perms.set_accept_edits_for_session();
+        engine
+            .store
+            .enqueue_part("missing", i64::MAX, "text", "invalid")
+            .unwrap();
+        assert!(engine.store.flush().is_err());
+        let result = engine.rt.block_on(execute_calls(
+            &engine,
+            &ctx,
+            "s",
+            1,
+            vec![palmcode_llm::types::ToolCallSpec {
+                id: "write".into(),
+                name: "write".into(),
+                arguments: r#"{"path":"must-not-exist","content":"data"}"#.into(),
+            }],
+        ));
+        assert!(result.is_err());
+        assert!(!root.join("must-not-exist").exists());
+    }
+
+    #[test]
+    fn stop_cancels_bash_and_next_turn_gets_a_fresh_token() {
+        struct Ignore;
+        impl EventSink for Ignore {
+            fn on_batch(&self, _: Vec<Event>) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::start(&dir.path().join("test.db"), Arc::new(Ignore)).unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        engine.set_workspace(root.to_str().unwrap()).unwrap();
+        let old = engine.tools_ctx("session").unwrap();
+        assert!(!old.cancel.is_cancelled());
+        engine.stop("session").unwrap();
+        assert!(old.cancel.is_cancelled());
+        let next = engine.tools_ctx("session").unwrap();
+        assert!(!next.cancel.is_cancelled());
+        assert!(!Arc::ptr_eq(&old, &next));
+    }
+
+    #[test]
+    fn persisted_cards_preserve_all_tool_kinds_and_bound_unicode_output() {
+        for name in ["read", "write", "edit", "bash"] {
+            let card = transcript_tool(palmcode_store::StoredToolCall {
+                id: name.into(),
+                session_id: "s".into(),
+                message_id: 1,
+                name: name.into(),
+                args: r#"{"path":"src/file","command":"echo hi"}"#.into(),
+                status: "done".into(),
+                started_at: Some(1),
+                finished_at: Some(2),
+                duration_ms: 123,
+                output: Some("界".repeat(9000)),
+                spill_path: None,
+            });
+            assert_eq!(card.name, name);
+            assert_eq!(card.status, "done");
+            assert_eq!(card.duration_ms, 123);
+            assert_eq!(card.output.chars().count(), 8192);
+            assert_eq!(
+                card.path.as_deref(),
+                Some(if name == "bash" {
+                    "echo hi"
+                } else {
+                    "src/file"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_card_does_not_present_stale_output_as_success() {
+        let card = transcript_tool(palmcode_store::StoredToolCall {
+            id: "c".into(),
+            session_id: "s".into(),
+            message_id: 1,
+            name: "bash".into(),
+            args: "invalid".into(),
+            status: "interrupted".into(),
+            started_at: None,
+            finished_at: None,
+            duration_ms: -1,
+            output: Some("partial".into()),
+            spill_path: None,
+        });
+        assert_eq!(card.output, "interrupted, outcome unknown");
+        assert_eq!(card.duration_ms, 0);
+        assert_eq!(card.path, None);
+    }
+
+    #[test]
+    fn bash_tap_flushes_on_timer_and_on_exit() {
+        struct Collector(Mutex<Vec<Event>>);
+        impl EventSink for Collector {
+            fn on_batch(&self, events: Vec<Event>) {
+                self.0.lock().unwrap().extend(events);
+            }
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let collector = Arc::new(Collector(Mutex::new(Vec::new())));
+        let emitter = Emitter::start(rt.handle().clone(), collector.clone());
+        let tap = TimedBashTap::new(BashTap {
+            emitter: emitter.clone(),
+            seq: Arc::new(AtomicU64::new(0)),
+            session_id: "session".into(),
+            message_id: 1,
+            call_id: "call".into(),
+            buf: Vec::new(),
+            total: 0,
+            last: Instant::now(),
+        });
+        tap.push(b"quiet line");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            emitter.flush();
+            if collector
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::ToolOutput { chunk, .. } if chunk == "quiet line"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer did not flush quiet output"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tap.push(b"final line");
+        drop(tap);
+        emitter.flush();
+        let events = collector.0.lock().unwrap();
+        let output: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolOutput {
+                    chunk, total_bytes, ..
+                } => Some((chunk.as_str(), *total_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(output, [("quiet line", 10), ("final line", 20)]);
+    }
+
+    #[test]
     fn prompt_family_switch() {
         assert_eq!(build_prompt("glm-4.6"), SYSTEM_PROMPT_BUILD_GLM);
         assert_eq!(build_prompt("mock-glm"), SYSTEM_PROMPT_BUILD_GLM);
@@ -2270,7 +2611,13 @@ mod tests {
         for p in [SYSTEM_PROMPT_BUILD_GLM, SYSTEM_PROMPT_BUILD_GENERIC] {
             assert!(p.contains("BUILD mode"));
             assert!(p.contains("syntax:"));
+            assert!(p.contains("Use the bash tool"));
+            assert!(!p.contains("not available in this build"));
+            assert!(!p.contains("No bash/shell/git tools"));
         }
+        let catalog = command_catalog();
+        assert!(catalog.contains("Bash is not a sandbox"));
+        assert!(catalog.contains("unknown outcome"));
         // no workspace -> old chunk-only prompt
         assert_eq!(system_prompt(None, None, "glm-4.6"), SYSTEM_PROMPT);
     }

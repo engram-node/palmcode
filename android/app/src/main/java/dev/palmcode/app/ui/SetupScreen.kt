@@ -1,5 +1,10 @@
 package dev.palmcode.app.ui
 
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -7,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
@@ -17,8 +23,11 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,10 +36,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.palmcode.app.CoreManager
+import dev.palmcode.app.ThemeMode
 import dev.palmcode.core.ProbeReportRecord
 import dev.palmcode.core.providerProbe
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +53,7 @@ import kotlinx.coroutines.withContext
 fun SetupScreen(onSaved: () -> Unit) {
     val store = CoreManager.store
     val scope = rememberCoroutineScope()
+    BackHandler(enabled = store.configured, onBack = onSaved)
 
     var baseUrl by remember { mutableStateOf(store.baseUrl) }
     var apiKey by remember { mutableStateOf("") }
@@ -49,6 +61,8 @@ fun SetupScreen(onSaved: () -> Unit) {
     var fastModel by remember { mutableStateOf(store.fastModel) }
 
     var probing by remember { mutableStateOf(false) }
+    var testingUserland by remember { mutableStateOf(false) }
+    var diagnostics by remember { mutableStateOf("Self-test has not run") }
     var probe by remember { mutableStateOf<ProbeReportRecord?>(null) }
     var probeError by remember { mutableStateOf<String?>(null) }
     var advanced by remember { mutableStateOf(false) }
@@ -72,10 +86,27 @@ fun SetupScreen(onSaved: () -> Unit) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Provider", style = MaterialTheme.typography.headlineMedium)
+        if (store.configured) {
+            TextButton(onClick = onSaved) { Text("< Chats") }
+        }
+        Text("Settings", style = MaterialTheme.typography.headlineMedium)
+        AppearanceSection()
+        Text("Diagnostics", style = MaterialTheme.typography.titleLarge)
+        Text(diagnostics, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(enabled = !testingUserland, onClick = {
+            testingUserland = true
+            scope.launch {
+                diagnostics = withContext(Dispatchers.IO) {
+                    runCatching { dev.palmcode.core.userlandSelfTest().message }
+                        .getOrDefault("Self-test unavailable")
+                }
+                testingUserland = false
+            }
+        }) { Text(if (testingUserland) "Testing…" else "Re-run self-test") }
+        Text("Provider", style = MaterialTheme.typography.titleLarge)
 
         if (cleartext) {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text(
                     "http:// endpoint — credentials and traffic unencrypted. Only acceptable on LAN/Tailscale.",
                     Modifier.padding(8.dp),
@@ -148,7 +179,7 @@ fun SetupScreen(onSaved: () -> Unit) {
         }
 
         probeError?.let {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text(it, Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -223,6 +254,42 @@ fun SetupScreen(onSaved: () -> Unit) {
 }
 
 @Composable
+private fun AppearanceSection() {
+    val store = CoreManager.store
+    Text("Appearance", style = MaterialTheme.typography.titleLarge)
+    Text("Theme", style = MaterialTheme.typography.titleMedium)
+    Row(Modifier.fillMaxWidth().selectableGroup()) {
+        ThemeMode.entries.forEach { mode ->
+            Row(
+                Modifier.weight(1f).selectable(
+                    selected = store.themeMode == mode,
+                    onClick = { store.setAppearance(mode = mode) },
+                    role = Role.RadioButton,
+                ).heightIn(min = 48.dp).padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = store.themeMode == mode, onClick = null)
+                Text(mode.name, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Row(
+            Modifier.fillMaxWidth().toggleable(
+                value = store.dynamicColor,
+                onValueChange = { store.setAppearance(dynamic = it) },
+                role = Role.Switch,
+            ).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Dynamic color", style = MaterialTheme.typography.bodyLarge)
+            Switch(checked = store.dynamicColor, onCheckedChange = null)
+        }
+    }
+}
+
+@Composable
 private fun ProbePanel(r: ProbeReportRecord) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Probe", style = MaterialTheme.typography.titleMedium)
@@ -235,7 +302,7 @@ private fun ProbePanel(r: ProbeReportRecord) {
         Row("cache counters", r.cachedTokens, if (r.cachedTokens) "cached_tokens exposed" else "not exposed")
         r.ttftMs?.let { Text("TTFT $it ms" + (r.sampleTps?.let { tps -> " · $tps tok/s" } ?: ""), style = MaterialTheme.typography.bodySmall) }
         r.chatError?.let {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text("sample chat failed: $it", Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
             }
         }

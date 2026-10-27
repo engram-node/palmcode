@@ -4,7 +4,9 @@
 
 use std::time::{Duration, Instant};
 
-use palmcode_exec::{Cancel, CaptureLimits, EnvSpec, Executor, HostExecutor, sweep_orphans};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use palmcode_exec::sweep_orphans;
+use palmcode_exec::{Cancel, CaptureLimits, EnvSpec, Executor, HostExecutor};
 
 fn env(dir: &std::path::Path) -> EnvSpec {
     EnvSpec {
@@ -17,6 +19,46 @@ fn env(dir: &std::path::Path) -> EnvSpec {
 
 fn exec() -> HostExecutor {
     HostExecutor::new()
+}
+
+#[test]
+fn restart_sweep_finds_nested_pidfiles_without_touching_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("session");
+    std::fs::create_dir(&session).unwrap();
+    let stale = session.join("bash-interrupted.pid");
+    std::fs::write(&stale, "invalid record\n").unwrap();
+    let unrelated = session.join("other.pid");
+    std::fs::write(&unrelated, "preserve").unwrap();
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+    assert!(!stale.exists());
+    assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "preserve");
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+}
+
+#[test]
+fn env_sanitization_rejects_provider_and_external_diff_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = env(dir.path());
+    for key in [
+        "PALMCODE_LLM_API_KEY",
+        "PALMCODE_LLM_BASE_URL",
+        "PALMCODE_LLM_MODEL",
+        "GIT_EXTERNAL_DIFF",
+    ] {
+        spec.extra.insert(key.into(), "fixture".into());
+    }
+    spec.extra.insert("PATH".into(), "untrusted".into());
+    let vars = spec.vars();
+    assert!(
+        !vars
+            .iter()
+            .any(|(key, _)| key.starts_with("PALMCODE_LLM_") || key == "GIT_EXTERNAL_DIFF")
+    );
+    assert!(
+        vars.iter()
+            .any(|(key, value)| key == "PATH" && value == &spec.path)
+    );
 }
 
 #[test]
@@ -72,6 +114,117 @@ fn stdin_is_closed_immediate_eof() {
         .unwrap();
     assert_eq!(res.exit, Some(0));
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn timeout_still_applies_after_both_pipes_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = exec().spec("exec >&- 2>&-; sleep 300", dir.path(), env(dir.path()));
+    spec.timeout = Duration::from_millis(150);
+    let started = Instant::now();
+    let result = exec().run(&spec, &mut |_: &[u8]| {}).unwrap();
+    assert!(result.timed_out);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn successful_leader_exit_kills_closed_pipe_and_setsid_children() {
+    for script in [
+        "(exec >/dev/null 2>&1; sleep 0.5; echo survived > survivor) & sleep 0.1; exit 0",
+        "setsid sh -c 'exec >/dev/null 2>&1; sleep 0.5; echo survived > survivor' & sleep 0.1; exit 0",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        exec()
+            .run(
+                &exec().spec(script, dir.path(), env(dir.path())),
+                &mut |_: &[u8]| {},
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(!dir.path().join("survivor").exists(), "{script}");
+    }
+}
+
+#[test]
+fn output_cap_bounds_sink_capture_and_spill_and_drains_to_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = exec().spec(
+        "head -c 34603008 /dev/zero; echo done > completed",
+        dir.path(),
+        env(dir.path()),
+    );
+    spec.spill_dir = Some(dir.path().join("spill"));
+    let mut streamed = 0;
+    let result = exec()
+        .run(&spec, &mut |bytes: &[u8]| {
+            streamed += bytes.len();
+        })
+        .unwrap();
+    assert_eq!(result.exit, Some(0));
+    assert!(
+        dir.path().join("completed").exists(),
+        "over-cap output must be drained"
+    );
+    assert_eq!(streamed, palmcode_exec::OUTPUT_CAP);
+    assert_eq!(
+        result.captured.total_bytes,
+        palmcode_exec::OUTPUT_CAP as u64
+    );
+    assert!(
+        result
+            .captured
+            .render()
+            .contains("remaining output discarded")
+    );
+    assert_eq!(
+        std::fs::metadata(result.spill.unwrap()).unwrap().len(),
+        palmcode_exec::OUTPUT_CAP as u64
+    );
+}
+
+#[test]
+fn slow_sink_backpressures_the_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = exec().spec(
+        "head -c 1048576 /dev/zero; echo done > producer-finished",
+        dir.path(),
+        env(dir.path()),
+    );
+    let mut checked = false;
+    let result = exec()
+        .run(&spec, &mut |_: &[u8]| {
+            if !checked {
+                std::thread::sleep(Duration::from_millis(200));
+                assert!(
+                    !dir.path().join("producer-finished").exists(),
+                    "producer drained into an unbounded queue while the sink was blocked"
+                );
+                checked = true;
+            }
+        })
+        .unwrap();
+    assert!(checked);
+    assert_eq!(result.exit, Some(0));
+    assert!(dir.path().join("producer-finished").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn sweep_rejects_reused_pid_and_wrong_boot_and_consumes_legacy_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = std::process::id();
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    for record in [
+        format!("{pid} 0 {}", boot.trim()),
+        format!("{pid} 0 wrong-boot"),
+        pid.to_string(),
+    ] {
+        let file = dir.path().join("bash-stale.pid");
+        std::fs::write(&file, record).unwrap();
+        assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+        assert!(!file.exists());
+    }
 }
 
 #[test]
@@ -142,9 +295,17 @@ fn env_is_not_inherited_from_the_parent() {
     // A secret in OUR env must never surface in the child's.
     // (set_var is unsafe in edition 2024; scope the mutation tightly.)
     unsafe { std::env::set_var("PALM_TEST_SECRET", "sk-do-not-leak") };
+    let mut child_env = env(dir.path());
+    for name in [
+        "PALMCODE_LLM_API_KEY",
+        "PALMCODE_LLM_BASE_URL",
+        "PALMCODE_LLM_MODEL",
+    ] {
+        child_env.extra.insert(name.into(), "test-only".into());
+    }
     let res = exec()
         .run(
-            &exec().spec("env", dir.path(), env(dir.path())),
+            &exec().spec("env", dir.path(), child_env),
             &mut |_b: &[u8]| {},
         )
         .unwrap();
@@ -155,12 +316,14 @@ fn env_is_not_inherited_from_the_parent() {
         "secret leaked: {rendered}"
     );
     assert!(!rendered.contains("PALM_TEST_SECRET"));
+    assert!(!rendered.contains("PALMCODE_LLM_"));
 }
 
 #[test]
-fn stale_pidfile_sweep_reaps_the_group() {
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn restart_orphan_sweep_reaps_the_group() {
     let dir = tempfile::tempdir().unwrap();
-    let pidfile = dir.path().join("run.pid");
+    let pidfile = dir.path().join("bash-restart.pid");
     let mut spec = exec().spec("sleep 30", dir.path(), env(dir.path()));
     spec.timeout = Duration::from_secs(60);
     spec.pidfile = Some(pidfile.clone());
@@ -170,7 +333,10 @@ fn stale_pidfile_sweep_reaps_the_group() {
     let mut pid = None;
     for _ in 0..100 {
         if let Ok(s) = std::fs::read_to_string(&pidfile) {
-            pid = s.trim().parse::<u32>().ok();
+            pid = s
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok());
             if pid.is_some() {
                 break;
             }
@@ -178,7 +344,7 @@ fn stale_pidfile_sweep_reaps_the_group() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(pid.is_some(), "pidfile never appeared");
-    assert_eq!(sweep_orphans(std::slice::from_ref(&pidfile)), 1);
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 1);
     assert!(!pidfile.exists(), "sweep must consume the pidfile");
     let started = Instant::now();
     let res = handle.join().unwrap().unwrap();

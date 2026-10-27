@@ -3,6 +3,10 @@
 What has actually been run, and where. Claims anywhere else in this repo are
 unverified unless listed here.
 
+Current M2/M3 criterion-by-criterion status: [closure table](M2_M3_CLOSURE.md)
+(2026-10-27). Acceptance remains partial; dated historical results below do
+not waive the current missing or manual-device checks.
+
 **Claim discipline:** an ABI/devices claim only counts as verified when it
 ran on *physical* hardware, listed below with date. Emulator results are
 called out as emulator-only.
@@ -256,3 +260,449 @@ CI check; local A/B verification covered BusyBox binaries.
 - Phantom-process limits on Android 12+ (docs/TROUBLESHOOTING.md), M3.
 - External-storage performance delta; measurement M5.
 - busybox / ripgrep cross-builds (M3; sizes in ADR 0008 are estimates).
+
+| Device check | Status | Exact steps |
+| --- | --- | --- |
+| Screen off during bash | PENDING | On device, approve and run `sleep 900; printf 'screen-off-complete\n'`. Turn the screen off immediately, leave it off for 10 minutes, then unlock. Wait for completion at 15 minutes. Verify the completion marker appears once, output remains responsive, and the run finishes successfully. |
+| Kill-mid-command orphan sweep | PENDING | On device, approve and run `sleep 300 & wait`. Before killing the app, use `adb shell ps -A -o PID,PPID,ARGS` to record the shell and sleep PIDs. Kill the app process with `adb shell run-as <application-id> kill -9 <app-pid>`, relaunch it, and run the same ps command. Verify both recorded child PIDs are absent after startup sweep. Repeat with `setsid sh -c 'sleep 300' & wait`. |
+| Userland farm failure | PENDING | On a debuggable device build, use `adb shell run-as <application-id>` to remove one entry from the app-private `userland/bin` farm and replace its path with a directory. Start a bash call. Verify a clear `userland unavailable` error and no command execution. Remove the obstructing directory, restart, and verify the farm is recreated using the current packaged libraries. Repeat after an app upgrade with a stale symlink and verify it is replaced. |
+
+| Date | Device verification | Result | Steps and limits |
+| --- | --- | --- | --- |
+| 2026-10-25 | Material You debug install and launch, Android API 36 | PASS | Built `:android:app:assembleDebug`, installed `app-universal-debug.apk` with `adb install -r`, and cold-launched `dev.palmcode/.app.MainActivity`. Existing app data was retained. |
+| 2026-10-25 | Appearance controls and persistence, Android API 36 | PASS | Selected Light and Dark with Dynamic color both on and off. Verified checked UI semantics and only the two appearance preference values. Force-stopped and relaunched the app for each combination; selections persisted and Settings remained usable. No provider probe or message was sent. |
+| 2026-10-25 | System mode and system-bar icon flags, Android API 36 | PASS | Selected System and changed Android night mode from yes to no. Verified `LIGHT_STATUS_BARS` and `LIGHT_NAVIGATION_BARS` were set for Light (dark icons) and absent for Dark (light icons). Verified forced Dark overrides light Android and forced Light overrides dark Android, including process restarts. Waited for checked radio semantics before querying window flags; an initial immediate post-tap assertion raced recomposition. Restored System, Dynamic color on, and Android night mode yes. |
+| 2026-10-25 | Palette fidelity, chat/markdown/tool/diff contrast, safe insets and themed launcher icon | PENDING | Manual visual inspection still required: compare System/Light/Dark with dynamic color on/off; inspect links, fenced/inline code, bash output, errors and added/removed diff lines; open the keyboard and check system-bar/IME insets; enable themed launcher icons. No screenshots were captured. |
+| 2026-10-25 | Pre-31 static fallback and hidden Dynamic color switch | PENDING | On an API 29 or 30 device, verify the Dynamic color control is absent and System/Light/Dark use the explicit static palettes. The connected phone is API 36 only. |
+
+## Stage 1 bash hardening - 2026-10-25
+
+- DONE: workspace fmt and Clippy (`--workspace --all-targets -- -D warnings`),
+  plus `cargo deny check` (advisories, bans, licenses, sources).
+- PARTIAL: workspace tests were split to cap exec separately. The non-exec
+  run passed 155 tests, with one ignored subprocess helper and one failure:
+  `tools::bash::tests::timeout_kills_the_tree_fast` exceeded its 10-second
+  assertion on this Windows sandbox (53.81 seconds for the tools suite).
+  The other 68 tools tests passed. This is not a green workspace test gate.
+- UNRUN: Windows exec integration suite, capped at 60 seconds with
+  `--test-threads=1`; cancellation/process-tree checks stall here. The
+  stage-end attempt also waited for the build lock. Four exec unit tests
+  passed. Run the complete exec suite on an unrestricted host.
+- DONE: the host subprocess regression killed an engine during a real
+  HostExecutor bash call, restarted against the same database, checked
+  `interrupted, outcome unknown` in model history, and resumed against a
+  local mock. The command's start marker remained exactly one line and no
+  new ToolStarted event occurred. Timer and final BashTap flush tests passed.
+- DONE: attached Android API 36 phone, text-only adb: 5 exec unit tests and
+  15 integration tests passed, including post-EOF timeout, successful-exit
+  process-group cleanup, adopted setsid children, identity-checked pidfiles,
+  the 32 MiB cap/drain marker, slow-sink backpressure, and absence of the
+  actual app credential variable names from child `env` output.
+- DONE: 16 classifier tests and 3 userland tests passed on the same phone.
+  These test sources were linked as standalone Rust test harnesses against
+  the built crates. Coverage includes canonical symlink containment,
+  secret names, flag values, literal expansion syntax, injected lookup /
+  mkdir / link / executable failures, stale links and directory obstructions.
+  Temporary device test executables were removed.
+- DONE: `:android:app:assembleDebug` built both Android ABIs and Kotlin
+  bindings. The universal debug APK installed with `adb install -r` and
+  cold-launched via `am start -W`; the process remained live and the app's
+  sh/rg/git farm links pointed to the newly installed native directory.
+- PENDING: in-app injected-failure result presentation, kill-mid-command
+  recovery of the full Android app, screen-off survival, and the remaining
+  existing M2/M3 acceptance checks. No screenshots, UI tapping or live
+  gateway requests were used. Full M2/M3 acceptance is not claimed.
+- Risks: bash remains same-UID execution, not confinement. ADR 0017 records
+  serialized Linux/Android cleanup and the startup detached-child identity
+  gap. Windows process-control verification remains outstanding. Deferred
+  history, vendor, F-Droid, M4, HTTPS git and iOS work was not changed.
+  Local commit hooks could not run gitleaks because it was absent from PATH;
+  no history scan was attempted.
+  Earlier sandbox crash/stage test logs remain untracked because orphan
+  shell handles deny deletion. The crash helper now waits for its release
+  acknowledgement before deleting its directory; the regression passed
+  again after that cleanup fix.
+
+## Stage 2 concurrency (2026-10-25)
+
+- DONE: bash executions share a four-slot gate across sessions; queued
+  cancellation does not spawn a child. Two queue regressions pass.
+- DONE: tools fmt and clippy with warnings denied; 66 tools tests pass with
+  the five process-executing bash tests excluded.
+- UNRUN: the full tools test run stalled in process execution in this
+  sandbox and was stopped. No Android behavior was exercised.
+- PENDING: device checks remain with the maintainer.
+
+## Stage 2 tool cards (2026-10-25)
+
+- DONE: transcript responses restore persisted tool cards for every tool;
+  output tails are capped at 8192 Unicode characters. Three regressions cover
+  card projection, interrupted status, and Stop cancellation/token renewal.
+- DONE: agent/FFI clippy with warnings denied; eight non-crash agent unit
+  tests and the FFI unit test pass. Tools checks are recorded above.
+- PARTIAL: bash cards render a lazy capped output list, status, duration and
+  a Kill action; Kill stops the turn and clears cached session grants.
+- PARTIAL: Settings can rerun a ten-second packaged-userland smoke test.
+  Android compilation is in progress; device behavior remains PENDING.
+
+## Stage 2 foreground lifetime (2026-10-25)
+
+- DONE: assembleDebug builds both ABIs and Kotlin with restored cards,
+  diagnostics and a dataSync foreground service. The service has a persistent
+  Stop action and holds a partial wake lock only during tracked turns.
+- DONE: notification permission and optional battery settings explanation
+  are requested once. Android dataSync timeout cancels turns without retry.
+- PENDING: notification visibility/denial, screen-off, Doze/app standby,
+  timeout and wake-lock behavior on device. No device commands were used.
+- DONE: both RunTracker JVM tests pass (overlapping turns, duplicate/terminal
+  events, failed-start retry and immutable snapshots). JUnit and Hamcrest
+  checksum pins were added to Gradle dependency verification metadata.
+
+## Stage 2 notification approvals (2026-10-25)
+
+- DONE: high-importance background notifications offer Approve once,
+  Always for session and Deny using the existing permission protocol.
+- DONE: two protocol regressions test all actions, malformed inputs,
+  request/session mismatch and stale process nonces; Android build and
+  all four JVM unit tests pass. The receiver is non-exported.
+- PENDING: actual delivery, session navigation, action dispatch and denied
+  notification permission behavior on device remain maintainer checks.
+
+## Stage 2 unattended bash (2026-10-25)
+
+- PARTIAL: trusted-only session toggle, visible banner, default-off state,
+  and hard-ask revalidation before cached grants. Unknown effects and
+  recursive/directory mutations still prompt (ADR 0022 records this cut).
+- DONE: two new policy tests cover trusted opt-in/reset, ordinary mutations,
+  network/git operations, protected files, outside paths, malformed parsing,
+  wrappers, expansions and globs. Existing exact-grant regression updated
+  to require a prompt for recursive wildcard deletion.
+- DONE: permissions crate tests and permissions/agent/FFI clippy pass.
+- PENDING: Android toggle behavior is not device-verified.
+- DONE: Android debug build and JVM unit tests pass for the preceding
+  notification receiver changes; unattended-toggle build is tracked at
+  the final stage gate below.
+
+## Stage 2 benchmark variant (2026-10-25)
+
+- PARTIAL: release-derived bench variant is debug-signed under a separate
+  application id. Non-exported no-display activity and foreground runner
+  accept only numeric loopback HTTP endpoints and 1-1000 scripted tool turns.
+- DONE: bench APK and argument-validation unit test pass, including the
+  foreground runner. Release merged manifest and packaged DEX contain no
+  BenchActivity; the bench DEX contains it. Final gates are recorded below.
+- Cut: direct shell am-start cannot launch a non-exported activity. ADR 0023
+  documents a run-as alternative, not device-verified. Debuggable enables
+  run-as but disables JVM optimization; native Rust remains release-built.
+- DONE in Stage 3: scripted device execution and phase/OVERHEAD timing via
+  bench-only instrumentation; see BENCHMARKS.md. Run-as remains unverified.
+  No mock or gateway traffic was generated during the Stage 2 session.
+
+## Stage 2 curated userland and final gates (2026-10-25)
+
+- DONE: BusyBox builds from checksum-verified source with 125 applets on
+  both ABIs. Compiled dispatch tables match the allowlist and generated
+  Rust catalog. Shell syntax and catalog regeneration checks pass.
+- DONE: catalog estimate is 719 -> 205 tokens for the applet-name list
+  (characters / 4, rounded up). This is not a tokenizer measurement.
+- DONE: stripped BusyBox sizes: arm64-v8a 990968 -> 338944 bytes;
+  x86_64 986784 -> 333760 bytes. See ADR 0024.
+- DONE: observed universal debug APK before/after curation:
+  66477869 -> 66476122 bytes. This is a whole-build comparison, not an
+  isolated BusyBox size experiment; other stage code/artifacts also changed.
+  Final unsigned universal release APK: 21367546 bytes; bench: 39209178 bytes.
+- DONE: `cargo fmt --all --check`, workspace/all-target Clippy with warnings
+  denied, `cargo test --workspace --no-run`, and `cargo deny check` pass.
+  Deny required access to its existing advisory-database lock outside the
+  sandbox; advisories, bans, licenses and sources all passed.
+- PARTIAL: 161 workspace tests passed with exec excluded and `crash_tests`
+  plus `timeout_kills_the_tree_fast` skipped. Provider environment variables
+  were removed from the test process; no live gateway tests were enabled.
+- UNRUN for acceptance: exec tests used `--test-threads=1` and a 60-second
+  cap. `cancel_stops_the_run` reported a failure before the suite stalled
+  at `timeout_kills_tree_including_grandchildren`. The test/cargo processes
+  were terminated; nested shell descendants resisted Windows termination.
+  Maintainer must run the complete exec/crash/timeout checks outside this
+  sandbox. Do not interpret the partial run as a pass.
+- DONE: `assembleDebug`, `assembleBench`, `assembleRelease`, release vital
+  lint, `testDebugUnitTest` (5 tests) and `testBenchUnitTest` (6 tests) pass.
+  A final bench-only rebuild/test also passes after pending-Stop handling.
+  Thirteen new logical tests were added: seven Rust and six JVM tests.
+- DONE: main-thread submission no longer blocks foreground-service startup;
+  Stop during submission is retained until native submission returns.
+  A JVM regression covers cancellation-state renewal (ADR 0025).
+- UNRUN: gitleaks was absent from PATH, so commit-hook secret scans were
+  skipped. No history scan was attempted.
+- PARTIAL: Stage 2 claimed no Android runtime behavior. Manual device checks,
+  including notification actions, wake locks, Doze/app standby, live bash
+  scrolling/Kill and self-test remain PENDING for the maintainer. Benchmark
+  execution was subsequently measured in Stage 3. No adb, UI tapping,
+  screenshots or gateway runs were used during the Stage 2 session.
+- Cuts/risks: unattended approval deliberately retains prompts for unknown
+  and recursive/directory effects; Kill stops the entire turn and resets
+  cached grants; bash is same-UID execution. Non-exported bench launch via
+  direct shell am-start is unavailable; the run-as alternative is unverified
+  and debuggable bench disables JVM optimization. M2/M3 acceptance is not
+  complete. Deferred work was not changed and nothing was pushed.
+
+## Stage 3 persistence, phases and device benchmark (2026-10-26)
+
+- DONE: one SQLite writer owns the connection, with a bounded FIFO queue
+  and batched commits. Cumulative streaming snapshots enqueue; durable
+  tool-intent, result and terminal barriers retain event ordering. A failed
+  write batch rolls back and fails closed until reopen. WAL and synchronous
+  FULL retain committed power-loss durability (ADR 0026).
+- DONE: numeric Android alog spans cover persist, request build, serialize,
+  connect/response headers and dispatch. The corrected OVERHEAD endpoint
+  includes serialization; connect is not a pure TCP-handshake span (ADR 0027).
+- DONE: bench-only instrumentation launches the private activity without
+  taps. `gradlew.bat :android:app:assembleBench :android:app:testBenchUnitTest`
+  passes. Packaged release DEX was inspected and contains no BenchActivity,
+  BenchService, BenchUiActivity or BenchInstrumentation.
+- DONE: attached-device mock runs and text-only gfxinfo collection are
+  recorded with exact commands, raw per-turn samples and artifact hashes
+  in BENCHMARKS.md and results/stage3-*.json. Both required headless runs
+  pass the overhead budget. No performance optimization iteration was needed.
+- PARTIAL: current and legacy gfxinfo jank counters disagree. Both are
+  preserved; no unqualified jank acceptance is claimed. The UI workload uses
+  read-tool cards and synthetic paced text, not live bash output. No gateway,
+  provider key, screenshot, UI tapping or global device setting change was used.
+- DONE: new tests cover writer FIFO/reopen recovery, atomic rollback and
+  sticky failure, queue backpressure/worker ownership, FULL/WAL pragmas,
+  and preventing tool execution after intent-persistence failure. The
+  benchmark parser self-test covers quantiles, phase sums, missing samples,
+  out-of-order/overlapping turns, missing tools and duplicate gaps:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -SelfTest`.
+- DONE: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --no-run`, and `cargo deny check` passed during
+  the stage. Final formatting and Clippy were repeated after the timing fix.
+- PARTIAL: final `cargo test --workspace --exclude palmcode-exec -- --test-threads=1 --skip crash_tests --skip timeout_kills_the_tree_fast`
+  passes all 166 selected tests and doctests; three tests were filtered.
+  Provider environment variables were removed from the test process. An
+  earlier overlapping host build produced a missing-crate doctest error;
+  this final serial test run completed successfully.
+- DONE: final `gradlew.bat :android:app:assembleDebug :android:app:assembleRelease :android:app:testDebugUnitTest :android:app:lintVitalRelease`
+  passes; the corrected benchmark APK build/unit-test gate also passes.
+- UNRUN for acceptance: `cargo test -p palmcode-exec -- --test-threads=1`
+  hit its 60-second cap. Cancellation failed before the process-tree timeout
+  stalled. Nested shell descendants resisted Windows termination. Complete
+  exec/crash/timeout validation remains for the maintainer outside this sandbox.
+- UNRUN: gitleaks is absent from PATH; no history scan was attempted.
+- PENDING: all maintainer manual notification/approval, wake-lock, Doze/app
+  standby, live bash scrolling/Kill and self-test checks remain unchanged.
+  Run-as launch is unverified. M2/M3 acceptance remains partial until those
+  and the sandbox-blocked checks pass. Deferred work remains untouched.
+
+## Stage 4 bash benchmark and named test gaps (2026-10-27)
+
+- DONE: `dd01e08` adds `bash_bench`: fifteen deterministic task fixtures,
+  paired trusted-workspace approval modes, the existing Engine/tools and
+  HostExecutor, deterministic verifiers, numeric-only traces, per-request
+  usage/latency/cache metrics and repeat spread. See BASH_BENCH.md / ADR 0029.
+- DONE: ten offline benchmark tests pass, including all reference solutions,
+  rejection of every unsolved fixture, altered-test rejection, recovery-event
+  requirements, optional usage/cache handling, quantiles and trace overwrite
+  refusal. Windows checks used MSYS2 usr/bin before system sh/git on PATH.
+  The git fixture uses built-in diff flags because external diff helpers
+  are deliberately disabled by the executor; the catalog documents them.
+- DONE: `cargo build --release -p palmcode-bench --bin bash_bench` and
+  `target/release/bash_bench.exe --list` pass without provider configuration.
+  A fresh Windows build initially selected MSYS gcc and failed to link;
+  rebuilding with MinGW first on PATH and explicit MinGW `CC`/`CXX` passed.
+  BASH_BENCH.md records the tested process-local toolchain setup. This was
+  a build/listing smoke check, not a live benchmark run.
+- DONE: new `interrupted_bash_resume_never_replays_the_persisted_command`
+  seeds an interrupted bash intent, restarts, resumes through a local mock,
+  preserves an unknown-outcome card and emits no new tool execution.
+  `request_metrics_report_mock_usage_without_wire_content` validates the
+  numeric request callback against the local mock. No live provider is used.
+  These named test gaps are committed in `c145b07`.
+- DONE: new executor tests cover rejected provider/git environment overrides
+  and nested restart pidfile discovery/idempotence without touching unrelated
+  files. The Linux/Android real orphan test now exercises the restart
+  `sweep_spill` entrypoint, not just a hand-supplied pidfile list.
+- DONE: final `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --no-run`, and `cargo deny check` pass.
+  Advisory, ban, license and source checks passed using the existing
+  advisory-database cache/lock. No dependency source/vendor drop was made.
+- PARTIAL: `cargo test --workspace --exclude palmcode-exec -- --test-threads=1 --skip crash_tests --skip timeout_kills_the_tree_fast`
+  passes 178 selected tests plus doctests; three tests were filtered.
+  Provider environment variables were removed from test processes.
+- UNRUN for acceptance: `cargo test -p palmcode-exec -- --test-threads=1`
+  was capped at 60 seconds. Four unit tests passed. Cancellation failed;
+  eleven integration tests passed before the grandchild-timeout test
+  stalled. Those passing tests include cap/spill/drain, environment checks
+  and the new restart discovery test. The verified test/cargo process tree
+  was terminated; some nested shells resisted Windows termination. The
+  complete exec/crash/timeout gates remain for an unrestricted host/device.
+- DONE: `gradlew.bat :android:app:assembleDebug :android:app:assembleBench :android:app:assembleRelease :android:app:testDebugUnitTest :android:app:testBenchUnitTest :android:app:lintVitalRelease`
+  passes. The new notification session/nonce isolation regression passes
+  in both JVM variants (6 debug tests / 7 bench tests, no failures/skips).
+  Packaged release DEX contains no BenchActivity,
+  BenchService, BenchUiActivity or BenchInstrumentation. No device commands
+  or UI interaction were used in Stage 4.
+- UNRUN: live bash benchmark, as explicitly reserved for the maintainer.
+  No pass rate, cache rate or ASKS performance result has been invented.
+  gitleaks is absent from PATH, so the commit-hook secret scan is skipped;
+  no history scan was attempted.
+- PARTIAL: M2/M3 closure is documented in M2_M3_CLOSURE.md. The separate
+  original spec is unavailable in the supplied context/targeted milestone
+  documents; the table identifies that traceability gap and inventories all
+  recoverable ADR 0011 / M3 contracts and supplied Stage 2/3 requirements.
+  Missing implementation and missing measurement are distinguished from
+  PENDING-DEVICE rows. All maintainer manual rows remain pending.
+
+## Device verification — 2026-10-27
+
+These entries supersede older pending rows only for the measured scope.
+Device: motorola edge 50 neo, Android 16 / API 36. Main package UID: 10646
+(`u0_a646`). Running source: `b68ad0b`, main **debug**, isolated **bench**
+variant. Both were update-installed; main data and Keystore were retained.
+No `pm clear`, uninstall, screenshot, live-provider turn or remote change
+was performed. UI dumps were parsed in memory; editable/provider values and
+existing chat content were redacted from output. The API-key field was never
+edited. Only the launcher label/icon change was made to application code.
+
+Installed packages:
+
+| Package | Purpose | Installed launcher label |
+|---|---|---|
+| `dev.palmcode` | Main application, existing Keystore and imported workspaces | `palmcode` |
+| `dev.palmcode.bench` | Separate application ID/data with the mock benchmark runner | `Palmcode Bench` |
+
+`b68ad0b` generates the label with Gradle `resValue`; bench also overrides
+the adaptive-icon background to `#6B3E12`. Main retains its original label
+and background. APK `aapt2 dump badging` confirmed both labels. Build/test:
+`gradlew.bat :android:app:assembleDebug :android:app:assembleBench :android:app:testDebugUnitTest :android:app:testBenchUnitTest`
+passed. Installation commands, from the repository root:
+
+```powershell
+adb install -r android/app/build/outputs/apk/debug/app-universal-debug.apk
+adb install -r android/app/build/outputs/apk/bench/app-universal-bench.apk
+```
+
+All agent turns used the existing `palmcode-bench scripts` mock through
+`adb reverse tcp:38787 tcp:38787`, with numeric loopback as the temporary
+base URL. No real model was invoked. A fresh app-private folder was created
+and selected through Workspaces > Add path:
+`/data/user/0/dev.palmcode/files/workspaces/dv-20261027`.
+The original workspace was reselected before the final read-only long run.
+Test messages and responses use `DV_*` markers. Host helpers/fixtures are
+under ignored `build/device-*.ps1` and `build/device-mock/`; they contain no
+provider identity, model identity or key. They are verification tooling,
+not application fixes.
+
+The exact mock launch pattern was
+`core/target/debug/palmcode-bench.exe scripts 38787 build/device-mock/<case>-tool.sse build/device-mock/<case>-final.sse`.
+Each tool fixture contains a uniquely identified bash call with the command
+and `timeout_ms` listed below; the final fixture emits the corresponding
+`DV_<CASE>_DONE` response. For F the first fixture contains read, write, edit
+and bash calls. For G the actual script order is
+`g-local-tool.sse g-network-tool.sse g-network-final.sse`.
+For notification verification, the existing mock listened on 38788 and an
+ignored Rust TCP relay on 38787 delayed each connection five seconds. This
+made Home precede the permission request; the relay logged numeric times
+only. Main notification permission was temporarily granted for the tests.
+
+The device/OS column below abbreviates the model as **edge 50 neo / 16 (36)**.
+Commands are PowerShell unless explicitly identified as bash tool input.
+UI coordinates were obtained from `adb exec-out uiautomator dump /dev/tty`.
+
+| Date | Step | Device / Android | Package / build | Commit | Exact command or interaction | Result | Evidence |
+|---|---|---|---|---|---|---|---|
+| 2026-10-27 | 0 preflight/install | edge 50 neo / 16 (36) | main debug + bench | `b68ad0b` | `adb devices`; `adb shell pm list packages` filtered for palmcode; install commands above; `aapt2 dump badging` on each APK | PASS | One attached phone; two distinct packages; both installs returned Success; labels `palmcode` / `Palmcode Bench`. |
+| 2026-10-27 | 1 Diagnostics | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Settings > `adb shell input tap 239 1141` (Re-run self-test); `adb exec-out uiautomator dump /dev/tty` | PASS | Diagnostics UI reported self-test passed after rerun. This smoke test does not establish support for every BusyBox flag. |
+| 2026-10-27 | 2 deterministic transport | edge 50 neo / 16 (36) | main debug | `b68ad0b` | `adb reverse tcp:38787 tcp:38787`; existing `palmcode-bench scripts` with generated static fixtures | PASS | Scripted `DV_*` replies; no live-provider turn or LLM-token use. |
+| 2026-10-27 | 3a ls | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `ls -la`, `timeout_ms=30000` | PASS | Bash card `[exit 0 · 46 ms]`; isolated fixture filename visible. |
+| 2026-10-27 | 3a pipeline | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `find . -name '*.md' \| xargs wc -l \| sort -n \| tail -5`, `timeout_ms=30000`; tap Allow once | FAIL | Bash card `[exit 1 · 44 ms]`; same-UID packaged-userland reproduction prints `tail: invalid option -- 5`. No applet/config fix was made. |
+| 2026-10-27 | 3b app tree | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sh -c 'sleep 500 & sleep 500'`, `timeout_ms=10000`; `adb shell ps -A` before/after | PASS | App-owned PIDs 4131 and 4142 existed while running; both disappeared after timeout. Card: `[timed out after 10000 ms · process tree killed]`. |
+| 2026-10-27 | 3b/e global absence | edge 50 neo / 16 (36) | main debug | `b68ad0b` | `adb shell ps -A \| rg sleep` | BLOCKED | An unrelated root-owned sleeper remained (PID 3464/PPID 2105 in the timeout sample). It is outside the allowed packages and was not killed. App-owned absence was checked separately with `Select-String '^u0_a646.*\bsleep$'`. |
+| 2026-10-27 | additional relative-create check | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `printf DV_C_RAN > dv-notification.txt`, `timeout_ms=30000` | FAIL | Tool UI: `error: denied: write outside the workspace: dv-notification.txt`. The active folder was the new app-private verification folder. This failed before asking, so a pathless command isolated the notification check. |
+| 2026-10-27 | 3c background approval | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sh -c 'echo DV_C_RAN'`; Send then `adb shell input keyevent 3`; `adb shell cmd statusbar expand-notifications`; `adb shell input tap 297 861` (Approve once) | PASS | Home at host epoch-ms 1793109648321 preceded relay forwarding at 1793109653283/1793109658372. Approve once / Always for session / Deny were visible. After tapping, `DV_C_RAN`, final `DV_C_DONE`, and `[exit 0 · 102 ms]` appeared. Main FGS was `isForeground=true`, type `0x00000001`. |
+| 2026-10-27 | 3e kill/restart/resume | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sleep 600`, `timeout_ms=600000`; `adb shell am force-stop dev.palmcode`; `adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`; wait 3 s; reopen latest session; tap Resume | PASS | App-owned sleep PID 4425 disappeared. Reopened `DV_E_SESSION` showed interrupted state and Resume. Resume produced `DV_E_RESUMED_SAFE`; no new app-owned sleep appeared. Global absence remains blocked as noted above. |
+| 2026-10-27 | 3f persisted cards | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Scripted read/write/edit/bash calls; `adb shell am force-stop dev.palmcode`; relaunch; wait for session list; reopen latest `DV_F_SESSION` | PASS | UI dump after process restart contained all four card kinds and the original user marker. This is rendering/rehydration evidence, not a separate assertion of write/edit correctness. |
+| 2026-10-27 | 3g trusted auto-approve | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Trust verification workspace; `adb shell input tap 96 323` (checkbox); bash `touch dv-auto-one && printf DV_G_MULTI && touch dv-auto-two`; next request `curl http://example.com`; tap Deny | PASS | Pre-existing fixture files isolate this from the relative-create failure. Local task ran without an approval and exited 0 in 48 ms. Banner: `Commands auto-approved · sensitive or unclassified operations still ask`. First prompt was curl; curl was denied and never executed. |
+| 2026-10-27 | 3h untrusted config | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Revoke trust; put `INVALID_JSON_FOR_IGNORE_TEST` in the verification folder's `.palmcode/config.json`; new session with bash `git status --short`; tap Deny | PASS | UI showed `untrusted — project config ignored`; git prompted despite the malformed project file; final `DV_H_DONE` arrived. The injected file and its empty directory were removed afterward. |
+| 2026-10-27 | 3d screen-off | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sleep 300; echo done`, `timeout_ms=600000`; `adb shell input keyevent 26`; one `Start-Sleep -Seconds 330`; `adb shell input keyevent 224`; `adb shell wm dismiss-keyguard`; UI dump; `adb logcat -d -T '10-27 20:31:29.000' -v brief` filtered for main-package freeze lines | PASS | Main FGS active with type `0x00000001` before lock. After the single 330-second wait, `done` was visible in the main UI and the new spill contained exactly `done`; zero matching app freeze lines in the retained log buffer and no remaining app-owned sleeps. `DV_D_SESSION_4` / `DV_D_DONE` were confirmed again after restart. Raw evidence: results/device-screenoff-2026-10-27.json. |
+| 2026-10-27 | 4 conditional overhead | edge 50 neo / 16 (36) | prior bench | `5b13f3d` | `rg -n '50 turns\|200 turns\|Gap p50' docs/BENCHMARKS.md` | PASS | Existing dated on-device results already satisfy the condition, so no duplicate run was made: 50-turn p50/p95 27.779/38.168 ms; 200-turn 13.712/35.316 ms, measured 2026-10-26. Existing phase table/raw JSON retain their original provenance. These are not new timings for `b68ad0b`. |
+
+### Failure excerpts and hypotheses
+
+No cause-bearing logcat lines were emitted for the two tool failures.
+The package-scoped logcat query was run while the failing app process was
+alive; its output contained numeric PHASE/PERSIST records, not tool stderr.
+The exact cause-bearing stderr/UI excerpts below are preserved instead of
+inventing logcat evidence. Each excerpt is fewer than ten lines.
+
+Pipeline stderr, reproduced through the installed farm as the app UID:
+
+```text
+tail: invalid option -- 5
+BusyBox v1.38.0 () multi-call binary.
+Usage: tail [OPTIONS] [FILE]...
+```
+
+Hypothesis: the curated BusyBox configuration omits support for the legacy
+`tail -5` option form required by this check.
+
+Relative-create tool UI:
+
+```text
+error: denied: write outside the workspace: dv-notification.txt
+```
+
+Hypothesis: nonexistent relative-target canonicalization/alias handling
+miscompares the app-private workspace root on Android.
+
+Cause-query and reproduction commands (PowerShell; the captured stderr was
+printed with a short line cap):
+
+```powershell
+$mainPid = ((adb shell pidof dev.palmcode) -join '').Trim()
+adb logcat -d "--pid=$mainPid" -v brief | rg 'tail: invalid option|write outside the workspace: dv-notification.txt'
+adb shell "run-as dev.palmcode /data/user/0/dev.palmcode/files/spill/userland/bin/sh -c 'PATH=/data/user/0/dev.palmcode/files/spill/userland/bin; cd /data/user/0/dev.palmcode/files/workspaces/dv-20261027; find . -name \*.md | xargs wc -l | sort -n | tail -5'"
+```
+
+The fixture directory and test sessions are retained for review. Imported
+project files were not changed. The malformed project-config probe was
+removed, verification-workspace trust returned to untrusted, and the
+original active workspace was reselected. Notification permission is
+restored to its original denied state. The original provider field was
+retained only in host memory; password inputs were never edited. Fresh
+process restarts confirmed the original field value during restoration.
+The final post-test restart also confirmed the original provider field and
+original active workspace. No provider value, model identity or key is
+included in this report. Runtime notification permission was rechecked as
+`granted=false`; the test reverse mapping was removed and host mocks stopped.
+
+For the screen-off run, provider restoration took place while the existing
+task retained its original mock client. Lock followed command start by
+19.566 seconds, then the screen stayed off for the single 330-second wait.
+This was a charging/screen-off test, not forced Doze. Initial stale or
+controller-navigation attempts never reached the timed wait and are not
+counted as results. The final successful attempt is recorded separately in
+the small JSON artifact; it contains only test metadata, booleans and an
+app-private spill path.
+
+Original power values were recorded before changes:
+`stay_on_while_plugged_in=15`, `screen_off_timeout=1800000`.
+The long-run controller restores them in `finally` using:
+
+```powershell
+adb shell settings put global stay_on_while_plugged_in 15
+adb shell settings put system screen_off_timeout 1800000
+adb shell pm revoke dev.palmcode android.permission.POST_NOTIFICATIONS
+```
+
+Final reads confirmed `stay_on_while_plugged_in=15` and
+`screen_off_timeout=1800000`. No manual intervention is needed to restore
+the device settings. The application-code commit is `b68ad0b`; this report
+does not include fixes for either runtime failure.
+
+Unmeasured scope remains pending: actual forced Doze/app standby, live bash
+scroll-follow/Kill interactions, notification session deep-link navigation,
+Always-for-session/Deny notification actions and notification-denial UX.
+The existing modern/legacy gfxinfo discrepancy is also unresolved; no new
+jank qualification is claimed in this session. Interrupted/stale controller
+attempts were discarded; no screen-off result is inferred from them.

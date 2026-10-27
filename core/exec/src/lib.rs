@@ -10,6 +10,8 @@
 
 mod host;
 mod native;
+mod recovery;
+pub use recovery::{enable_subreaper, sweep_spill};
 
 pub mod applets;
 
@@ -42,6 +44,23 @@ pub const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Capture window kept inline: head + tail of the merged stream.
 pub const CAPTURE_HEAD: usize = 32 * 1024;
 pub const CAPTURE_TAIL: usize = 32 * 1024;
+pub const OUTPUT_CAP: usize = 32 * 1024 * 1024;
+pub const OUTPUT_CAP_MARKER: &[u8] = b"\n[output limit reached; remaining output discarded]\n";
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+static RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TreeGuard {
+    pid: u32,
+    before: Vec<(u32, u64)>,
+    began: u64,
+}
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        kill_group_force(self.pid);
+        recovery::sweep_children(&self.before, self.pid, self.began);
+    }
+}
 
 /// Merged stdout+stderr chunks as they arrive (live stream for tool cards).
 pub trait OutputSink {
@@ -87,11 +106,44 @@ impl EnvSpec {
         m.insert("TERM".into(), "dumb".into());
         m.insert("TMPDIR".into(), self.tmpdir.to_string_lossy().into_owned());
         for (k, v) in &self.extra {
-            m.insert(k.clone(), v.clone());
+            if !k.starts_with("PALMCODE_LLM_") && k != "GIT_EXTERNAL_DIFF" {
+                m.insert(k.clone(), v.clone());
+            }
         }
         m.insert("PATH".into(), self.path.clone());
         m.into_iter().collect()
     }
+}
+
+/// Git command-scope configuration outranks repository and global config.
+/// Paths must refer to an app-controlled empty file and empty directory.
+pub fn git_environment(
+    env: &EnvSpec,
+    empty_config: &Path,
+    empty_hooks: &Path,
+) -> Vec<(String, String)> {
+    let mut vars: BTreeMap<_, _> = env.vars().into_iter().collect();
+    vars.retain(|k, _| !k.starts_with("GIT_CONFIG_") && k != "GIT_EXTERNAL_DIFF");
+    vars.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+    vars.insert(
+        "GIT_CONFIG_GLOBAL".into(),
+        empty_config.to_string_lossy().into_owned(),
+    );
+    let settings = [
+        ("core.fsmonitor", "false".to_owned()),
+        ("core.hooksPath", empty_hooks.to_string_lossy().into_owned()),
+        ("core.pager", "cat".to_owned()),
+        ("diff.external", String::new()),
+        ("core.sshCommand", String::new()),
+        ("credential.helper", String::new()),
+        ("safe.directory", env.home.to_string_lossy().into_owned()),
+    ];
+    vars.insert("GIT_CONFIG_COUNT".into(), settings.len().to_string());
+    for (n, (key, value)) in settings.into_iter().enumerate() {
+        vars.insert(format!("GIT_CONFIG_KEY_{n}"), key.into());
+        vars.insert(format!("GIT_CONFIG_VALUE_{n}"), value);
+    }
+    vars.into_iter().collect()
 }
 
 #[derive(Clone, Copy)]
@@ -239,14 +291,13 @@ pub trait Executor: Send + Sync {
 
 /// Force-kill any process groups recorded in leftover pidfiles (resume path
 /// after kill-mid-command). Returns how many groups were signalled.
-/// shortcut: a stale pidfile can hit a reused pid, record process start-time
-/// in the pidfile if pidfiles ever live longer than one session.
+/// PID, process start time and boot identity must all match before signalling.
 pub fn sweep_orphans(pidfiles: &[PathBuf]) -> usize {
     let mut swept = 0;
     for pf in pidfiles {
         if let Some(pid) = std::fs::read_to_string(pf)
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
+            .and_then(|s| recovery::verified_pid(&s))
             && kill_group_force(pid)
         {
             swept += 1;
@@ -261,6 +312,13 @@ pub fn sweep_orphans(pidfiles: &[PathBuf]) -> usize {
 // ---------------------------------------------------------------------------
 
 static SPILL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+struct GitConfigDir(PathBuf);
+impl Drop for GitConfigDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 struct Spill {
     file: std::fs::File,
@@ -290,12 +348,30 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
         .argv
         .first()
         .ok_or_else(|| Error::Spec("empty argv".into()))?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let _run_lock = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_subreaper()?;
+    let before = recovery::children();
+    let began = recovery::start_tick();
     let started = Instant::now();
+    // A private per-call directory prevents workspace config from supplying
+    // hooks or global configuration. Remove it when the call finishes.
+    let git_dir = spec.env.tmpdir.join(format!(
+        "git-config-{}-{}",
+        std::process::id(),
+        SPILL_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&git_dir)?;
+    let git_guard = GitConfigDir(git_dir);
+    let empty_config = git_guard.0.join("config");
+    let empty_hooks = git_guard.0.join("hooks");
+    std::fs::write(&empty_config, [])?;
+    std::fs::create_dir(&empty_hooks)?;
     let mut cmd = Command::new(argv0);
     cmd.args(&spec.argv[1..])
         .current_dir(&spec.cwd)
         .env_clear()
-        .envs(spec.env.vars())
+        .envs(git_environment(&spec.env, &empty_config, &empty_hooks))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -304,12 +380,15 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
         .spawn()
         .map_err(|e| Error::Spawn(format!("{argv0}: {e}")))?;
     let pid = child.id();
-    if let Some(pf) = &spec.pidfile {
-        let _ = std::fs::write(pf, format!("{pid}\n"));
+    let _tree_guard = TreeGuard { pid, before, began };
+    if let Some(pf) = &spec.pidfile
+        && let Some(record) = recovery::identity(pid)
+    {
+        std::fs::write(pf, record)?;
     }
 
     // Two reader threads merge into one channel; arrival order is the merge.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
     let mut pipes: Vec<Box<dyn Read + Send>> = Vec::new();
     if let Some(p) = child.stdout.take() {
         pipes.push(Box::new(p));
@@ -344,9 +423,40 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
     let mut timed_out = false;
     let mut cancelled = false;
     let mut status: Option<ExitStatus> = child.try_wait()?;
-    let mut last_data = Instant::now();
+    let mut eof = false;
+    let mut exited_at = None;
+    let mut remaining = OUTPUT_CAP - OUTPUT_CAP_MARKER.len();
+    let mut capped = false;
+    let mut collect = |chunk: &[u8]| -> Result<()> {
+        let n = chunk.len().min(remaining);
+        let kept = &chunk[..n];
+        sink.on_chunk(kept);
+        acc.push(kept);
+        if let Some(s) = &mut spill {
+            s.write(kept)?;
+        }
+        remaining -= n;
+        if n < chunk.len() && !capped {
+            capped = true;
+            sink.on_chunk(OUTPUT_CAP_MARKER);
+            acc.push(OUTPUT_CAP_MARKER);
+            if let Some(s) = &mut spill {
+                s.write(OUTPUT_CAP_MARKER)?;
+            }
+        }
+        Ok(())
+    };
 
     loop {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if status.is_some() && exited_at.is_none() {
+            // A successful leader exit does not authorize background children.
+            kill_group_force(pid);
+            recovery::sweep_children(&_tree_guard.before, pid, began);
+            exited_at = Some(Instant::now());
+        }
         if status.is_none() {
             if !timed_out && Instant::now() >= deadline {
                 terminate_tree(pid);
@@ -357,42 +467,32 @@ pub(crate) fn run(spec: &ExecSpec, sink: &mut dyn OutputSink) -> Result<ExecResu
                 cancelled = true;
             }
         }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(chunk) => {
-                sink.on_chunk(&chunk);
-                acc.push(&chunk);
-                if let Some(s) = &mut spill {
-                    s.write(&chunk)?;
-                }
-                last_data = Instant::now();
+        if eof {
+            // EOF is not process exit: continue checking the deadline/cancel.
+            if status.is_some() {
+                break;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if status.is_none() {
-                    status = child.try_wait()?;
-                }
-                // Child exited but a grandchild still holds the pipes open:
-                // the bash contract says command done = tree done (no
-                // leftovers), so reap stragglers and stop waiting.
-                if status.is_some() && last_data.elapsed() > Duration::from_millis(200) {
-                    terminate_tree(pid);
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(chunk) => collect(&chunk)?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => eof = true,
+        }
+        if exited_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200)) {
+            // Detached descendants must not hold completion hostage.
+            break;
         }
     }
-
-    // Drain whatever arrived while terminating (best effort).
-    while let Ok(chunk) = rx.try_recv() {
-        sink.on_chunk(&chunk);
-        acc.push(&chunk);
-        if let Some(s) = &mut spill {
-            s.write(&chunk)?;
-        }
+    // Bounded channel: final drain cannot grow without bound.
+    for _ in 0..16 {
+        let Ok(chunk) = rx.try_recv() else {
+            break;
+        };
+        collect(&chunk)?;
     }
-    if status.is_none() {
-        status = Some(child.wait()?);
-    }
+    drop(rx);
     if let Some(pf) = &spec.pidfile {
         let _ = std::fs::remove_file(pf);
     }
@@ -513,6 +613,50 @@ fn tree_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_overrides_and_credentials_cannot_be_injected() {
+        let env = EnvSpec {
+            path: "bin".into(),
+            home: "workspace".into(),
+            tmpdir: "tmp".into(),
+            extra: [
+                "PALMCODE_LLM_API_KEY",
+                "PALMCODE_LLM_BASE_URL",
+                "PALMCODE_LLM_MODEL",
+                "GIT_EXTERNAL_DIFF",
+                "GIT_CONFIG_KEY_99",
+                "GIT_CONFIG_COUNT",
+            ]
+            .into_iter()
+            .map(|k| (k.into(), "untrusted".into()))
+            .collect(),
+        };
+        let vars: BTreeMap<_, _> = git_environment(&env, Path::new("empty"), Path::new("hooks"))
+            .into_iter()
+            .collect();
+        assert!(!vars.keys().any(|k| k.starts_with("PALMCODE_LLM_")
+            || k == "GIT_EXTERNAL_DIFF"
+            || k == "GIT_CONFIG_KEY_99"));
+        assert_eq!(vars["GIT_CONFIG_NOSYSTEM"], "1");
+        assert_eq!(vars["GIT_CONFIG_GLOBAL"], "empty");
+        assert_eq!(vars["GIT_CONFIG_COUNT"], "7");
+        for (n, (key, value)) in [
+            ("core.fsmonitor", "false"),
+            ("core.hooksPath", "hooks"),
+            ("core.pager", "cat"),
+            ("diff.external", ""),
+            ("core.sshCommand", ""),
+            ("credential.helper", ""),
+            ("safe.directory", "workspace"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(vars[&format!("GIT_CONFIG_KEY_{n}")], key);
+            assert_eq!(vars[&format!("GIT_CONFIG_VALUE_{n}")], value);
+        }
+    }
 
     #[test]
     fn env_is_an_allowlist_sorted_and_deterministic() {

@@ -28,6 +28,11 @@ import dev.palmcode.core.workspaceClear
 import dev.palmcode.core.workspaceCurrent
 import dev.palmcode.core.workspaceSet
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface Screen {
     data object Setup : Screen
@@ -51,7 +56,7 @@ class ChatMsg(val id: Long, val role: String) {
     val tools = mutableStateListOf<ToolCard>()
 }
 
-/** A tool call in flight or done (live events only; not rehydrated). */
+/** A tool call restored from storage or updated by live events. */
 class ToolCard(val id: String, val name: String, val path: String?) {
     var done by mutableStateOf(false)
     var ok by mutableStateOf(false)
@@ -74,10 +79,13 @@ class Approval(
 object AppState {
     var screen by mutableStateOf<Screen>(Screen.Setup)
     var providerCleartext by mutableStateOf(false)
+    var userlandReady by mutableStateOf(false)
+    var userlandMessage by mutableStateOf("")
     val sessions = mutableStateListOf<SessionInfo>()
     val approvals = mutableStateListOf<Approval>()
     /** "Accept edits for this session" toggle state, per session id. */
     val acceptEdits = mutableStateMapOf<String, Boolean>()
+    val unattendedBash = mutableStateMapOf<String, Boolean>()
     var workspace by mutableStateOf<String?>(null)
     private val transcripts = mutableStateMapOf<String, SnapshotStateList<ChatMsg>>()
 
@@ -98,6 +106,15 @@ object AppState {
                 m.streaming = t.streaming
                 m.interrupted = t.interrupted
                 m.error = t.error
+                for (c in t.tools) {
+                    m.tools.add(ToolCard(c.id, c.name, c.path).also {
+                        it.done = c.status != "pending"
+                        it.ok = c.status == "done"
+                        it.durationMs = c.durationMs.toLong()
+                        it.preview = c.output
+                        if (c.name == "bash") it.liveOutput = c.output
+                    })
+                }
                 if (t.tokens > 0u) m.completionTokens = t.tokens.toLong()
                 list.add(m)
             }
@@ -164,6 +181,7 @@ object AppState {
                             c.ok = e.ok
                             c.durationMs = e.durationMs.toLong()
                             c.preview = e.preview
+                            if (c.name == "bash") c.liveOutput = e.preview
                         }
                     }
                     is CoreEvent.ToolOutput -> find(e.sessionId, e.messageId)?.let { m ->
@@ -184,6 +202,10 @@ object AppState {
                     }
                     is CoreEvent.ApprovalResolved -> approvals.removeAll { it.requestId == e.requestId }
                     is CoreEvent.AutoApproveEdits -> e.sessionId?.let { acceptEdits[it] = e.on }
+                    is CoreEvent.UserlandStatus -> {
+                        userlandReady = e.ok
+                        userlandMessage = e.message
+                    }
                 }
             }
         }
@@ -196,11 +218,57 @@ object AppState {
  */
 object CoreManager {
     private val main = Handler(Looper.getMainLooper())
+    private lateinit var appContext: Context
+    private val runs = RunTracker()
+    private val runScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    val activeRuns: Set<String> get() = runs.active
+    var appVisible = false
+        private set
+
+    fun setAppVisible(visible: Boolean) {
+        appVisible = visible
+        for (approval in AppState.approvals) {
+            if (visible) ApprovalNotifications.cancel(appContext, approval.requestId)
+            else ApprovalNotifications.post(appContext, approval)
+        }
+    }
+
+    fun stopActiveRuns() {
+        activeRuns.toList().forEach { stop(it) }
+    }
+
+    private fun beginRun(sessionId: String) {
+        check(runs.begin(sessionId)) { "Session already running" }
+        try {
+            RunService.start(appContext)
+        } catch (e: Exception) {
+            runs.finish(sessionId)
+            throw e
+        }
+    }
+
+    private fun finishRun(sessionId: String) {
+        runs.finish(sessionId)
+        if (activeRuns.isEmpty()) RunService.stop(appContext)
+    }
     // Strong ref: the UniFFI callback object must not be GC'd.
     private val listener = object : CoreEventListener {
         override fun onEvents(events: List<CoreEvent>) {
             main.post {
                 AppState.apply(events)
+                for (event in events) {
+                    when (event) {
+                        is CoreEvent.MessageFinished -> finishRun(event.sessionId)
+                        is CoreEvent.Interrupted -> finishRun(event.sessionId)
+                        is CoreEvent.TurnError -> finishRun(event.sessionId)
+                        is CoreEvent.ApprovalRequested -> if (!appVisible) {
+                            AppState.approvals.firstOrNull { it.requestId == event.requestId }
+                                ?.let { ApprovalNotifications.post(appContext, it) }
+                        }
+                        is CoreEvent.ApprovalResolved -> ApprovalNotifications.cancel(appContext, event.requestId)
+                        else -> {}
+                    }
+                }
                 if (events.any { it is CoreEvent.SessionCreated }) refreshSessions()
             }
         }
@@ -212,6 +280,8 @@ object CoreManager {
     @Synchronized
     fun ensureStarted(context: Context) {
         if (started) return
+        appContext = context.applicationContext
+        ApprovalNotifications.clearStale(appContext)
         check(PalmcodeCore.nativeInitAndroid(context) == 0) { "native TLS init failed" }
         coreStart(File(context.filesDir, "palmcode.db").absolutePath, listener)
         store = ProviderStore(context.applicationContext)
@@ -253,20 +323,40 @@ object CoreManager {
         AppState.screen = Screen.Chat(sessionId)
     }
 
-    fun send(sessionId: String, text: String): Result<Unit> = runCatching {
-        messageSend(sessionId, text)
-        Unit
+    private fun submit(sessionId: String, operation: () -> Unit): Result<Unit> = runCatching<Unit> {
+        beginRun(sessionId)
+        runScope.launch {
+            try {
+                withContext(Dispatchers.IO) { operation() }
+                if (runs.stopRequested(sessionId)) turnStop(sessionId)
+            } catch (_: Exception) {
+                turnStop(sessionId)
+                finishRun(sessionId)
+                android.widget.Toast.makeText(appContext, "Could not start the turn. Please retry.", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
-    fun stop(sessionId: String) = turnStop(sessionId)
+    fun send(sessionId: String, text: String): Result<Unit> = submit(sessionId) { messageSend(sessionId, text) }
 
-    fun resumeChat(sessionId: String) = turnResume(sessionId)
+    fun stop(sessionId: String) {
+        runs.requestStop(sessionId)
+        turnStop(sessionId)
+        AppState.unattendedBash.remove(sessionId)
+    }
+
+    fun setUnattendedBash(sessionId: String, on: Boolean) {
+        AppState.unattendedBash[sessionId] = dev.palmcode.core.sessionSetUnattendedBash(sessionId, on)
+    }
+
+    fun resumeChat(sessionId: String) = submit(sessionId) { turnResume(sessionId) }
 
     // ---- M2: approvals + workspace ----
 
     /** scope: "once" | "session" | "project" */
     fun resolveApproval(requestId: ULong, approved: Boolean, scope: String) {
         approvalResolve(requestId, approved, scope)
+        ApprovalNotifications.cancel(appContext, requestId)
         AppState.approvals.removeAll { it.requestId == requestId }
     }
 
@@ -277,11 +367,13 @@ object CoreManager {
 
     fun setWorkspace(root: String) {
         workspaceSet(root)
+        AppState.unattendedBash.clear()
         AppState.workspace = root
     }
 
     fun clearWorkspace() {
         workspaceClear()
+        AppState.unattendedBash.clear()
         AppState.workspace = null
     }
 
