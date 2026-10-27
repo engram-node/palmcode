@@ -56,6 +56,59 @@ async fn happy_path_via_mock() {
 }
 
 #[tokio::test]
+async fn standard_tool_chat_wire_omits_disabled_continuous_usage_extension() {
+    let server = serve(MockConfig::default()).await.unwrap();
+    let c = client(&server, timeouts(1000, 1000));
+    let mut request = req();
+    request.tools = Some(vec![serde_json::json!({
+        "name": "read",
+        "description": "Read a file",
+        "input_schema": {"type": "object", "properties": {}},
+    })]);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&request, tx).await.unwrap();
+    let bodies = server.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    let wire: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+    assert_eq!(
+        wire["stream_options"],
+        serde_json::json!({"include_usage": true})
+    );
+    assert_eq!(wire["tool_choice"], "auto");
+    assert!(
+        wire["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn probe_does_not_enable_unrequested_extension_from_usage_chunks() {
+    let usage_stream = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+    for enabled in [false, true] {
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: usage_stream.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = Client::new(ClientConfig {
+            base_url: server.base_url(),
+            api_key: SecretKey::new("synthetic-fixture".into()),
+            timeouts: timeouts(1000, 1000),
+            continuous_usage: enabled,
+        })
+        .unwrap();
+        let report = palmcode_llm::probe::probe(&c, "fixture").await;
+        assert!(report.chat.is_none());
+        assert_eq!(report.continuous_usage, enabled);
+    }
+}
+
+#[tokio::test]
 async fn retries_before_first_token_then_succeeds() {
     let server = serve(MockConfig {
         scripts: vec![

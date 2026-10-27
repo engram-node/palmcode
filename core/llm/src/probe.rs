@@ -124,7 +124,8 @@ pub async fn probe(client: &Client, model: &str) -> ProbeReport {
         Ok(outcome) => {
             report.ttft = outcome.ttft;
             report.reasoning_field = outcome.reasoning_field.map(|f| f.name());
-            report.continuous_usage = outcome.usage_chunks > 1;
+            // Standard usage chunks alone do not prove acceptance of this extension.
+            report.continuous_usage = client.continuous_usage() && outcome.usage_chunks > 1;
             if let Some(u) = &outcome.usage {
                 if u.cached_tokens.is_some() {
                     report.cached_tokens_exposed = true;

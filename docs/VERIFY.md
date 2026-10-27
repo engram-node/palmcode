@@ -765,3 +765,45 @@ attempts were discarded. Post-Test-connection appearance follows the same
 stored-key placeholder state; the live provider button was not exercised.
 Power settings were not changed. Known lint failures from the preceding
 provider-save regression remain; lint was not rerun for this UI-only follow-up.
+
+### Strict stream-options compatibility — 2026-10-27
+
+Source: commit containing this section, parent `88aae3c`. On motorola edge 50
+neo / Android 16, opened the most recent existing conversation using
+`adb shell input tap 600 550` from the session list and inspected
+`adb exec-out uiautomator dump /dev/tty` in memory. No chat was submitted.
+Sanitized existing error evidence (all other response values omitted):
+
+```text
+HTTP 400
+Unknown name "continuous_usage_stats" at 'stream_options'
+INVALID_ARGUMENT
+```
+
+Cause: the shared request builder sent a server extension even when disabled.
+Read `adb exec-out run-as dev.palmcode cat shared_prefs/provider.xml` only into
+memory and printed solely the `continuous_usage` boolean: false. No provider
+fields or key material were printed. The fix omits the disabled extension;
+explicit opt-in still sends true, and standard usage accounting remains enabled.
+
+PASS from `core/`:
+`cargo fmt -p palmcode-llm --check`;
+`cargo clippy -p palmcode-llm --all-targets -- -D warnings`;
+`cargo test -p palmcode-llm -- --skip live_probe_and_chat`.
+35 non-live tests passed (19 unit, 6 fixture, 10 mock behavior); three added
+regressions cover opt-in/omission, the actual HTTP body with tool schemas, and
+preventing Test connection from enabling an unrequested extension merely from
+receiving multiple usage chunks (checks both opt-in states).
+An initial crate test invocation also returned successfully through the live
+test's missing-environment guard; no live endpoint request was made.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+rebuilt both native ABIs and packaged the final debug app; the debug JVM suite
+contains 13 passing tests. PASS on the same phone:
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`, then
+`adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`.
+PENDING: a fresh owner-provider chat confirming acceptance of the corrected
+request. The existing saved error was sufficient to diagnose the offending
+field; no live call was sent during this fix. No data clear, uninstall, provider
+edit, or power-setting change was performed. Lint retains the preceding
+generated-code/local-configuration failures and was not rerun for this change.
