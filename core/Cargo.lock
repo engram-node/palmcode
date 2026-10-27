@@ -1122,9 +1122,12 @@ name = "palmcode-bench"
 version = "0.1.0"
 dependencies = [
  "palmcode-agent",
+ "palmcode-exec",
  "palmcode-llm",
+ "serde_json",
  "tempfile",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

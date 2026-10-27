@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 palmcode-agent = { path = "../agent" }
 palmcode-llm = { path = "../llm" }
+palmcode-exec = { path = "../exec" }
+serde_json = "1"
+zeroize = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
@@ -19,3 +22,7 @@ path = "src/main.rs"
 [[bin]]
 name = "edit-bench"
 path = "src/bin/edit_bench.rs"
+
+[[bin]]
+name = "bash_bench"
+path = "src/bin/bash_bench.rs"

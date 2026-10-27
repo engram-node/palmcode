@@ -103,7 +103,7 @@ fn system_prompt(tools: Option<&Arc<ToolsCtx>>, workspace: Option<&Path>, model:
 /// before the volatile env block so the prompt head stays prefix-cacheable).
 fn command_catalog() -> String {
     format!(
-        "## Commands (packaged userland)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first. Bash is not a sandbox: approved commands run with the app's UID and can access its files and network. An interrupted command has an unknown outcome; inspect the workspace before deciding whether to retry.",
+        "## Commands (packaged userland)\nPATH serves busybox applets: {} plus `rg` (ripgrep 15) and `git` (2.x). Each bash call is a fresh `sh -c` in the workspace (HOME = workspace root; the parent env is never inherited). Run scripts as `sh script` -- `#!/usr/bin/env` does not exec on this platform (ADR 0014). Use `git diff --no-ext-diff --no-textconv` for built-in diffs; external diff programs are disabled. Provably read-only commands run without approval; anything mutating, dynamic or unparseable asks first. Bash is not a sandbox: approved commands run with the app's UID and can access its files and network. An interrupted command has an unknown outcome; inspect the workspace before deciding whether to retry.",
         palmcode_exec::BUSYBOX_APPLETS.join(" ")
     )
 }
@@ -237,6 +237,19 @@ pub enum Event {
 
 pub trait EventSink: Send + Sync {
     fn on_batch(&self, events: Vec<Event>);
+    /// Optional host diagnostics. Numeric request statistics only; no wire content.
+    fn on_request_metrics(&self, _metrics: RequestMetrics) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestMetrics {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub cached_tokens: Option<u32>,
+    pub ttft_ms: Option<u64>,
+    pub elapsed_ms: u64,
+    pub retries: Option<u32>,
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1220,6 +1233,7 @@ async fn stream_once(
     gap_start: Option<Instant>,
     acc: &mut Merge<'_>,
 ) -> IterationFlow {
+    let request_started = Instant::now();
     let full_text = &mut *acc.text;
     let full_reasoning = &mut *acc.reasoning;
     let cancel_rx = &mut *acc.cancel_rx;
@@ -1305,6 +1319,15 @@ async fn stream_once(
         }
     };
     drop(rx);
+    engine.emitter.sink.on_request_metrics(RequestMetrics {
+        prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+        completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
+        cached_tokens: usage.as_ref().and_then(|u| u.cached_tokens),
+        ttft_ms: ttft.map(|d| d.as_millis() as u64),
+        elapsed_ms: request_started.elapsed().as_millis() as u64,
+        retries: outcome.as_ref().ok().map(|o| o.retries),
+        ok: outcome.is_ok(),
+    });
     IterationFlow {
         outcome,
         tool_calls: accumulator.finish(),
