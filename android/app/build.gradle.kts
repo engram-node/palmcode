@@ -18,6 +18,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        resValue("string", "launcher_label", "palmcode")
     }
 
     ndkVersion = ndkVersionPin
@@ -42,6 +43,7 @@ android {
         create("bench") {
             initWith(getByName("release"))
             applicationIdSuffix = ".bench"
+            resValue("string", "launcher_label", "Palmcode Bench")
             signingConfig = signingConfigs.getByName("debug")
             isDebuggable = true
             matchingFallbacks += "release"
@@ -55,6 +57,7 @@ android {
 
     buildFeatures {
         compose = true
+        resValues = true
     }
 
     packaging {
