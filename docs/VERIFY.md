@@ -552,3 +552,157 @@ CI check; local A/B verification covered BusyBox binaries.
   recoverable ADR 0011 / M3 contracts and supplied Stage 2/3 requirements.
   Missing implementation and missing measurement are distinguished from
   PENDING-DEVICE rows. All maintainer manual rows remain pending.
+
+## Device verification — 2026-10-27
+
+These entries supersede older pending rows only for the measured scope.
+Device: motorola edge 50 neo, Android 16 / API 36. Main package UID: 10646
+(`u0_a646`). Running source: `b68ad0b`, main **debug**, isolated **bench**
+variant. Both were update-installed; main data and Keystore were retained.
+No `pm clear`, uninstall, screenshot, live-provider turn or remote change
+was performed. UI dumps were parsed in memory; editable/provider values and
+existing chat content were redacted from output. The API-key field was never
+edited. Only the launcher label/icon change was made to application code.
+
+Installed packages:
+
+| Package | Purpose | Installed launcher label |
+|---|---|---|
+| `dev.palmcode` | Main application, existing Keystore and imported workspaces | `palmcode` |
+| `dev.palmcode.bench` | Separate application ID/data with the mock benchmark runner | `Palmcode Bench` |
+
+`b68ad0b` generates the label with Gradle `resValue`; bench also overrides
+the adaptive-icon background to `#6B3E12`. Main retains its original label
+and background. APK `aapt2 dump badging` confirmed both labels. Build/test:
+`gradlew.bat :android:app:assembleDebug :android:app:assembleBench :android:app:testDebugUnitTest :android:app:testBenchUnitTest`
+passed. Installation commands, from the repository root:
+
+```powershell
+adb install -r android/app/build/outputs/apk/debug/app-universal-debug.apk
+adb install -r android/app/build/outputs/apk/bench/app-universal-bench.apk
+```
+
+All agent turns used the existing `palmcode-bench scripts` mock through
+`adb reverse tcp:38787 tcp:38787`, with numeric loopback as the temporary
+base URL. No real model was invoked. A fresh app-private folder was created
+and selected through Workspaces > Add path:
+`/data/user/0/dev.palmcode/files/workspaces/dv-20261027`.
+The original workspace was reselected before the final read-only long run.
+Test messages and responses use `DV_*` markers. Host helpers/fixtures are
+under ignored `build/device-*.ps1` and `build/device-mock/`; they contain no
+provider identity, model identity or key. They are verification tooling,
+not application fixes.
+
+The exact mock launch pattern was
+`core/target/debug/palmcode-bench.exe scripts 38787 build/device-mock/<case>-tool.sse build/device-mock/<case>-final.sse`.
+Each tool fixture contains a uniquely identified bash call with the command
+and `timeout_ms` listed below; the final fixture emits the corresponding
+`DV_<CASE>_DONE` response. For F the first fixture contains read, write, edit
+and bash calls. For G the actual script order is
+`g-local-tool.sse g-network-tool.sse g-network-final.sse`.
+For notification verification, the existing mock listened on 38788 and an
+ignored Rust TCP relay on 38787 delayed each connection five seconds. This
+made Home precede the permission request; the relay logged numeric times
+only. Main notification permission was temporarily granted for the tests.
+
+The device/OS column below abbreviates the model as **edge 50 neo / 16 (36)**.
+Commands are PowerShell unless explicitly identified as bash tool input.
+UI coordinates were obtained from `adb exec-out uiautomator dump /dev/tty`.
+
+| Date | Step | Device / Android | Package / build | Commit | Exact command or interaction | Result | Evidence |
+|---|---|---|---|---|---|---|---|
+| 2026-10-27 | 0 preflight/install | edge 50 neo / 16 (36) | main debug + bench | `b68ad0b` | `adb devices`; `adb shell pm list packages` filtered for palmcode; install commands above; `aapt2 dump badging` on each APK | PASS | One attached phone; two distinct packages; both installs returned Success; labels `palmcode` / `Palmcode Bench`. |
+| 2026-10-27 | 1 Diagnostics | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Settings > `adb shell input tap 239 1141` (Re-run self-test); `adb exec-out uiautomator dump /dev/tty` | PASS | Diagnostics UI reported self-test passed after rerun. This smoke test does not establish support for every BusyBox flag. |
+| 2026-10-27 | 2 deterministic transport | edge 50 neo / 16 (36) | main debug | `b68ad0b` | `adb reverse tcp:38787 tcp:38787`; existing `palmcode-bench scripts` with generated static fixtures | PASS | Scripted `DV_*` replies; no live-provider turn or LLM-token use. |
+| 2026-10-27 | 3a ls | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `ls -la`, `timeout_ms=30000` | PASS | Bash card `[exit 0 · 46 ms]`; isolated fixture filename visible. |
+| 2026-10-27 | 3a pipeline | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `find . -name '*.md' \| xargs wc -l \| sort -n \| tail -5`, `timeout_ms=30000`; tap Allow once | FAIL | Bash card `[exit 1 · 44 ms]`; same-UID packaged-userland reproduction prints `tail: invalid option -- 5`. No applet/config fix was made. |
+| 2026-10-27 | 3b app tree | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sh -c 'sleep 500 & sleep 500'`, `timeout_ms=10000`; `adb shell ps -A` before/after | PASS | App-owned PIDs 4131 and 4142 existed while running; both disappeared after timeout. Card: `[timed out after 10000 ms · process tree killed]`. |
+| 2026-10-27 | 3b/e global absence | edge 50 neo / 16 (36) | main debug | `b68ad0b` | `adb shell ps -A \| rg sleep` | BLOCKED | An unrelated root-owned sleeper remained (PID 3464/PPID 2105 in the timeout sample). It is outside the allowed packages and was not killed. App-owned absence was checked separately with `Select-String '^u0_a646.*\bsleep$'`. |
+| 2026-10-27 | additional relative-create check | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `printf DV_C_RAN > dv-notification.txt`, `timeout_ms=30000` | FAIL | Tool UI: `error: denied: write outside the workspace: dv-notification.txt`. The active folder was the new app-private verification folder. This failed before asking, so a pathless command isolated the notification check. |
+| 2026-10-27 | 3c background approval | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sh -c 'echo DV_C_RAN'`; Send then `adb shell input keyevent 3`; `adb shell cmd statusbar expand-notifications`; `adb shell input tap 297 861` (Approve once) | PASS | Home at host epoch-ms 1793109648321 preceded relay forwarding at 1793109653283/1793109658372. Approve once / Always for session / Deny were visible. After tapping, `DV_C_RAN`, final `DV_C_DONE`, and `[exit 0 · 102 ms]` appeared. Main FGS was `isForeground=true`, type `0x00000001`. |
+| 2026-10-27 | 3e kill/restart/resume | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sleep 600`, `timeout_ms=600000`; `adb shell am force-stop dev.palmcode`; `adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`; wait 3 s; reopen latest session; tap Resume | PASS | App-owned sleep PID 4425 disappeared. Reopened `DV_E_SESSION` showed interrupted state and Resume. Resume produced `DV_E_RESUMED_SAFE`; no new app-owned sleep appeared. Global absence remains blocked as noted above. |
+| 2026-10-27 | 3f persisted cards | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Scripted read/write/edit/bash calls; `adb shell am force-stop dev.palmcode`; relaunch; wait for session list; reopen latest `DV_F_SESSION` | PASS | UI dump after process restart contained all four card kinds and the original user marker. This is rendering/rehydration evidence, not a separate assertion of write/edit correctness. |
+| 2026-10-27 | 3g trusted auto-approve | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Trust verification workspace; `adb shell input tap 96 323` (checkbox); bash `touch dv-auto-one && printf DV_G_MULTI && touch dv-auto-two`; next request `curl http://example.com`; tap Deny | PASS | Pre-existing fixture files isolate this from the relative-create failure. Local task ran without an approval and exited 0 in 48 ms. Banner: `Commands auto-approved · sensitive or unclassified operations still ask`. First prompt was curl; curl was denied and never executed. |
+| 2026-10-27 | 3h untrusted config | edge 50 neo / 16 (36) | main debug | `b68ad0b` | Revoke trust; put `INVALID_JSON_FOR_IGNORE_TEST` in the verification folder's `.palmcode/config.json`; new session with bash `git status --short`; tap Deny | PASS | UI showed `untrusted — project config ignored`; git prompted despite the malformed project file; final `DV_H_DONE` arrived. The injected file and its empty directory were removed afterward. |
+| 2026-10-27 | 3d screen-off | edge 50 neo / 16 (36) | main debug | `b68ad0b` | bash `sleep 300; echo done`, `timeout_ms=600000`; `adb shell input keyevent 26`; one `Start-Sleep -Seconds 330`; `adb shell input keyevent 224`; `adb shell wm dismiss-keyguard`; UI dump; `adb logcat -d -T '10-27 20:31:29.000' -v brief` filtered for main-package freeze lines | PASS | Main FGS active with type `0x00000001` before lock. After the single 330-second wait, `done` was visible in the main UI and the new spill contained exactly `done`; zero matching app freeze lines in the retained log buffer and no remaining app-owned sleeps. `DV_D_SESSION_4` / `DV_D_DONE` were confirmed again after restart. Raw evidence: results/device-screenoff-2026-10-27.json. |
+| 2026-10-27 | 4 conditional overhead | edge 50 neo / 16 (36) | prior bench | `5b13f3d` | `rg -n '50 turns\|200 turns\|Gap p50' docs/BENCHMARKS.md` | PASS | Existing dated on-device results already satisfy the condition, so no duplicate run was made: 50-turn p50/p95 27.779/38.168 ms; 200-turn 13.712/35.316 ms, measured 2026-10-26. Existing phase table/raw JSON retain their original provenance. These are not new timings for `b68ad0b`. |
+
+### Failure excerpts and hypotheses
+
+No cause-bearing logcat lines were emitted for the two tool failures.
+The package-scoped logcat query was run while the failing app process was
+alive; its output contained numeric PHASE/PERSIST records, not tool stderr.
+The exact cause-bearing stderr/UI excerpts below are preserved instead of
+inventing logcat evidence. Each excerpt is fewer than ten lines.
+
+Pipeline stderr, reproduced through the installed farm as the app UID:
+
+```text
+tail: invalid option -- 5
+BusyBox v1.38.0 () multi-call binary.
+Usage: tail [OPTIONS] [FILE]...
+```
+
+Hypothesis: the curated BusyBox configuration omits support for the legacy
+`tail -5` option form required by this check.
+
+Relative-create tool UI:
+
+```text
+error: denied: write outside the workspace: dv-notification.txt
+```
+
+Hypothesis: nonexistent relative-target canonicalization/alias handling
+miscompares the app-private workspace root on Android.
+
+Cause-query and reproduction commands (PowerShell; the captured stderr was
+printed with a short line cap):
+
+```powershell
+$mainPid = ((adb shell pidof dev.palmcode) -join '').Trim()
+adb logcat -d "--pid=$mainPid" -v brief | rg 'tail: invalid option|write outside the workspace: dv-notification.txt'
+adb shell "run-as dev.palmcode /data/user/0/dev.palmcode/files/spill/userland/bin/sh -c 'PATH=/data/user/0/dev.palmcode/files/spill/userland/bin; cd /data/user/0/dev.palmcode/files/workspaces/dv-20261027; find . -name \*.md | xargs wc -l | sort -n | tail -5'"
+```
+
+The fixture directory and test sessions are retained for review. Imported
+project files were not changed. The malformed project-config probe was
+removed, verification-workspace trust returned to untrusted, and the
+original active workspace was reselected. Notification permission is
+restored to its original denied state. The original provider field was
+retained only in host memory; password inputs were never edited. Fresh
+process restarts confirmed the original field value during restoration.
+The final post-test restart also confirmed the original provider field and
+original active workspace. No provider value, model identity or key is
+included in this report. Runtime notification permission was rechecked as
+`granted=false`; the test reverse mapping was removed and host mocks stopped.
+
+For the screen-off run, provider restoration took place while the existing
+task retained its original mock client. Lock followed command start by
+19.566 seconds, then the screen stayed off for the single 330-second wait.
+This was a charging/screen-off test, not forced Doze. Initial stale or
+controller-navigation attempts never reached the timed wait and are not
+counted as results. The final successful attempt is recorded separately in
+the small JSON artifact; it contains only test metadata, booleans and an
+app-private spill path.
+
+Original power values were recorded before changes:
+`stay_on_while_plugged_in=15`, `screen_off_timeout=1800000`.
+The long-run controller restores them in `finally` using:
+
+```powershell
+adb shell settings put global stay_on_while_plugged_in 15
+adb shell settings put system screen_off_timeout 1800000
+adb shell pm revoke dev.palmcode android.permission.POST_NOTIFICATIONS
+```
+
+Final reads confirmed `stay_on_while_plugged_in=15` and
+`screen_off_timeout=1800000`. No manual intervention is needed to restore
+the device settings. The application-code commit is `b68ad0b`; this report
+does not include fixes for either runtime failure.
+
+Unmeasured scope remains pending: actual forced Doze/app standby, live bash
+scroll-follow/Kill interactions, notification session deep-link navigation,
+Always-for-session/Deny notification actions and notification-denial UX.
+The existing modern/legacy gfxinfo discrepancy is also unresolved; no new
+jank qualification is claimed in this session. Interrupted/stale controller
+attempts were discarded; no screen-off result is inferred from them.
