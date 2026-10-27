@@ -18,6 +18,13 @@ decrypted credentials was rejected because it unnecessarily exposes secrets to
 the UI. Independent asynchronous field writes were rejected because encryption
 failure could otherwise leave a saved URL paired with an old or missing key.
 
+Follow-up: render a fixed-length masked placeholder inside the empty key field
+when ciphertext exists, including after Test connection and Settings reentry.
+An external status alone still looked like key loss. The placeholder is display
+text, never an input value or replacement credential, and reveals no key length.
+Disable key editing while a save/probe is active so clearing the saved draft
+cannot discard a replacement typed during the operation.
+
 Regression coverage uses injected preferences/cipher failures on the JVM and
 dedicated preferences in the isolated bench package for real Android Keystore
 round trips across a process restart. It never overwrites the owner's key.

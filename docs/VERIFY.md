@@ -745,3 +745,23 @@ No lint baseline or unrelated generated/configuration file was changed.
 No power settings were changed for these short checks. Final reads:
 `adb shell settings get global stay_on_while_plugged_in` → `15`;
 `adb shell settings get system screen_off_timeout` → `1800000`.
+
+### Saved-key indicator follow-up — 2026-10-27
+
+Source: commit containing this section, parent `f55ffb5`. Debug build on
+motorola edge 50 neo, Android 16. PASS:
+`./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(13 JVM tests), followed by
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+Opened with `adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`,
+located Settings using `adb exec-out uiautomator dump /dev/tty`, then
+`adb shell input tap 1053 233` and another text dump. PASS: saved-key mask
+`(saved)` and replacement hint are visible with the field unfocused after
+process restart. The field's label is outside the input because an inline
+floating label hides an empty field's placeholder when unfocused.
+Only booleans were printed from the final text dump; owner credentials were
+not edited and no provider request was sent. Initial navigation/placeholder
+attempts were discarded. Post-Test-connection appearance follows the same
+stored-key placeholder state; the live provider button was not exercised.
+Power settings were not changed. Known lint failures from the preceding
+provider-save regression remain; lint was not rerun for this UI-only follow-up.

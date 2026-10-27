@@ -143,17 +143,21 @@ fun SetupScreen(onSaved: () -> Unit) {
             label = { Text("Base URL (…/v1)") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        Text("API key", style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(
             value = apiKey, onValueChange = { apiKey = it },
-            label = { Text(if (store.hasApiKey) "API key (stored — leave blank to keep)" else "API key") },
+            placeholder = {
+                Text(if (store.hasApiKey) "•••••••• (saved)" else "Enter API key")
+            },
+            supportingText = {
+                if (store.hasApiKey) Text("Stored securely on this device. Type a new key to replace it.")
+            },
+            enabled = !probing && !saving,
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
-        if (store.hasApiKey && apiKey.isBlank()) {
-            Text("API key saved securely. Leave blank to keep it.", style = MaterialTheme.typography.bodySmall)
-        }
         OutlinedTextField(
             value = mainModel, onValueChange = { mainModel = it },
             label = { Text("Main model") }, singleLine = true,
