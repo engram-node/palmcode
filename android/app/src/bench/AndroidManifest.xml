@@ -10,4 +10,6 @@
     </application>
     <instrumentation android:name="dev.palmcode.bench.BenchInstrumentation"
         android:targetPackage="dev.palmcode.bench" android:functionalTest="true" />
+    <instrumentation android:name="dev.palmcode.bench.ProviderStoreInstrumentation"
+        android:targetPackage="dev.palmcode.bench" android:functionalTest="true" />
 </manifest>

@@ -291,16 +291,17 @@ object CoreManager {
 
     /** Keystore-decrypt the key and hand it to Rust; zero the JVM copy. */
     fun configureFromStore(): Boolean {
-        val keyBytes = store.loadApiKey() ?: return false
+        var keyBytes: ByteArray? = null
         return try {
+            keyBytes = store.loadApiKey() ?: return false
             val key = String(keyBytes, Charsets.UTF_8)
             providerConfigure(store.toRecord(key))
-            keyBytes.fill(0)
             AppState.providerCleartext = store.cleartext
             true
         } catch (_: Exception) {
-            keyBytes.fill(0)
             false
+        } finally {
+            keyBytes?.fill(0)
         }
     }
 

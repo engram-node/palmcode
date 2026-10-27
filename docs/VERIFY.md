@@ -706,3 +706,42 @@ Always-for-session/Deny notification actions and notification-denial UX.
 The existing modern/legacy gfxinfo discrepancy is also unresolved; no new
 jank qualification is claimed in this session. Interrupted/stale controller
 attempts were discarded; no screen-off result is inferred from them.
+
+### Provider credential save regression — 2026-10-27
+
+Source: the commit containing this section, based on `ef06a72`. Device:
+motorola edge 50 neo, Android 16. Only synthetic credentials were used in
+dedicated `provider-save-regression` preferences in `dev.palmcode.bench`.
+The main app's saved credentials and workspaces were not edited by these tests.
+
+| Result | Build | Exact command | Evidence |
+|---|---|---|---|
+| PASS | bench | `adb install -r android/app/build/outputs/apk/bench/app-arm64-v8a-bench.apk` | Success |
+| PASS | bench | `adb shell am instrument -w -e mode write dev.palmcode.bench/dev.palmcode.bench.ProviderStoreInstrumentation` | `credentials_saved_without_model=true`, instrumentation code -1 |
+| PASS | bench | `adb shell am force-stop dev.palmcode.bench` then `adb shell am instrument -w -e mode read dev.palmcode.bench/dev.palmcode.bench.ProviderStoreInstrumentation` | `key_survived_process_restart=true`, `blank_keeps_key=true`, `replacement_persisted=true`, code -1; dedicated test preferences removed |
+| PASS | debug | `adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` | Success; in-place main app update, no uninstall or data clear |
+| PASS | debug | `adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`; `adb shell input tap 1053 233`; `adb exec-out uiautomator dump /dev/tty` | Settings control located at `[985,209][1121,257]` before tapping. Filtered text dump confirms Settings, password field, and `API key saved securely. Leave blank to keep it.`; no provider/key field values printed |
+
+Host regression: `ProviderStoreTest` covers single-commit encrypted persistence,
+replacement, blank-field retention, encryption failure, failed-write cache
+rollback, incomplete ciphertext/IV metadata, and failed initial save. No live
+provider request or owner-key replacement was performed. UI interaction with
+the Save button remains unmeasured; device coverage exercises the exact store
+implementation used by Save and Test connection with the real Android Keystore.
+
+Build/test command:
+`./gradlew.bat :android:app:testDebugUnitTest :android:app:testBenchUnitTest :android:app:assembleDebug :android:app:assembleBench :android:app:lintDebug --console=plain`.
+Both APK assemblies and both JVM test tasks passed. After adding the seventh
+initial-write-failure case, reran
+`./gradlew.bat :android:app:testDebugUnitTest :android:app:testBenchUnitTest --console=plain`.
+Final counts: debug 13 tests, bench 14 tests, zero failures/errors; seven
+`ProviderStoreTest` cases run in each variant.
+Lint FAIL: three `NewApi` errors in existing generated UniFFI Cleaner calls
+(API 33, minSdk 29) and one `PropertyEscape` error in local `local.properties`.
+Hypothesis: existing generated bindings and local SDK path configuration need
+separate lint remediation; no lint errors point at the provider-save changes.
+No lint baseline or unrelated generated/configuration file was changed.
+
+No power settings were changed for these short checks. Final reads:
+`adb shell settings get global stay_on_while_plugged_in` → `15`;
+`adb shell settings get system screen_off_timeout` → `1800000`.

@@ -42,9 +42,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.palmcode.app.CoreManager
 import dev.palmcode.app.ThemeMode
+import dev.palmcode.app.ProviderSettings
 import dev.palmcode.core.ProbeReportRecord
 import dev.palmcode.core.providerProbe
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -61,6 +63,8 @@ fun SetupScreen(onSaved: () -> Unit) {
     var fastModel by remember { mutableStateOf(store.fastModel) }
 
     var probing by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var saveMessage by remember { mutableStateOf<String?>(null) }
     var testingUserland by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("Self-test has not run") }
     var probe by remember { mutableStateOf<ProbeReportRecord?>(null) }
@@ -75,6 +79,25 @@ fun SetupScreen(onSaved: () -> Unit) {
     var extraBodyJson by remember { mutableStateOf(store.extraBodyJson ?: "") }
     var firstTokenSecs by remember { mutableStateOf(store.firstTokenSecs.toString()) }
     var idleSecs by remember { mutableStateOf(store.idleSecs.toString()) }
+
+    fun settings() = ProviderSettings(
+        baseUrl = baseUrl.trim(), mainModel = mainModel.trim(), fastModel = fastModel.trim(),
+        continuousUsage = continuousUsage,
+        contextWindow = contextWindow.toUIntOrNull() ?: 128_000u,
+        maxOutputTokens = maxOutputTokens.toUIntOrNull() ?: 16_384u,
+        firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL,
+        idleSecs = idleSecs.toULongOrNull() ?: 60UL,
+        samplingJson = samplingJson.ifBlank { null }, extraBodyJson = extraBodyJson.ifBlank { null },
+    )
+
+    suspend fun persist(profile: ProviderSettings, replacement: ByteArray?) {
+        try {
+            withContext(Dispatchers.IO) { store.save(profile, replacement) }
+            apiKey = ""
+        } finally {
+            replacement?.fill(0)
+        }
+    }
 
     val cleartext = baseUrl.startsWith("http://")
 
@@ -128,6 +151,9 @@ fun SetupScreen(onSaved: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (store.hasApiKey && apiKey.isBlank()) {
+            Text("API key saved securely. Leave blank to keep it.", style = MaterialTheme.typography.bodySmall)
+        }
         OutlinedTextField(
             value = mainModel, onValueChange = { mainModel = it },
             label = { Text("Main model") }, singleLine = true,
@@ -141,34 +167,32 @@ fun SetupScreen(onSaved: () -> Unit) {
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
-                enabled = !probing && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
+                enabled = !probing && !saving && mainModel.isNotBlank() && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
                 onClick = {
-                    // stage values so the probe runs against the edited config
-                    store.baseUrl = baseUrl
-                    store.mainModel = mainModel
-                    store.fastModel = fastModel
-                    store.continuousUsage = continuousUsage
-                    store.firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL
-                    store.idleSecs = idleSecs.toULongOrNull() ?: 60UL
-                    if (apiKey.isNotBlank()) {
-                        val bytes = apiKey.toByteArray(Charsets.UTF_8)
-                        store.saveApiKey(bytes)
-                        bytes.fill(0)
-                    }
-                    CoreManager.configureFromStore()
+                    val profile = settings()
+                    val replacement = apiKey.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
                     probing = true
                     probeError = null
                     scope.launch {
-                        val r = withContext(Dispatchers.IO) {
-                            runCatching { providerProbe() }
+                        try {
+                            persist(profile, replacement)
+                            saveMessage = "API key saved securely."
+                            if (!withContext(Dispatchers.IO) { CoreManager.configureFromStore() }) {
+                                probeError = "Settings saved, but provider configuration could not be applied. Check model and advanced settings."
+                            } else {
+                                val report = withContext(Dispatchers.IO) { providerProbe() }
+                                probe = report
+                                continuousUsage = report.continuousUsage
+                                report.maxModelLen?.let { contextWindow = it.toString() }
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            probeError = "Could not save settings or test the connection. Check your settings and retry."
+                        } finally {
+                            replacement?.fill(0)
+                            probing = false
                         }
-                        probing = false
-                        r.onSuccess {
-                            probe = it
-                            // prefill capability defaults from the probe; user can override
-                            continuousUsage = it.continuousUsage
-                            it.maxModelLen?.let { len -> contextWindow = len.toString() }
-                        }.onFailure { probeError = it.message }
                     }
                 },
             ) { Text(if (probing) "Probing…" else "Test connection") }
@@ -228,28 +252,36 @@ fun SetupScreen(onSaved: () -> Unit) {
 
         Spacer(Modifier.height(8.dp))
         Button(
-            enabled = baseUrl.isNotBlank() && mainModel.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
+            enabled = !saving && !probing && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
             onClick = {
-                store.baseUrl = baseUrl
-                store.mainModel = mainModel
-                store.fastModel = fastModel
-                store.continuousUsage = continuousUsage
-                store.contextWindow = contextWindow.toUIntOrNull() ?: 128_000u
-                store.maxOutputTokens = maxOutputTokens.toUIntOrNull() ?: 16_384u
-                store.firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL
-                store.idleSecs = idleSecs.toULongOrNull() ?: 60UL
-                store.samplingJson = samplingJson.ifBlank { null }
-                store.extraBodyJson = extraBodyJson.ifBlank { null }
-                if (apiKey.isNotBlank()) {
-                    val bytes = apiKey.toByteArray(Charsets.UTF_8)
-                    store.saveApiKey(bytes)
-                    bytes.fill(0)
+                val profile = settings()
+                val replacement = apiKey.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
+                saving = true
+                saveMessage = null
+                scope.launch {
+                    try {
+                        persist(profile, replacement)
+                        saveMessage = "API key saved securely."
+                        if (profile.mainModel.isBlank()) {
+                            saveMessage = "API key saved securely. Enter a main model to continue."
+                        } else if (withContext(Dispatchers.IO) { CoreManager.configureFromStore() }) {
+                            onSaved()
+                        } else {
+                            saveMessage = "Settings and API key saved securely, but provider configuration could not be applied. Check model and advanced settings."
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        saveMessage = "Could not save provider settings securely. Please retry."
+                    } finally {
+                        replacement?.fill(0)
+                        saving = false
+                    }
                 }
-                store.configured = true
-                if (CoreManager.configureFromStore()) onSaved()
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Save and continue") }
+        ) { Text(if (saving) "Saving..." else if (mainModel.isBlank()) "Save credentials" else "Save and continue") }
+        saveMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 

@@ -1,14 +1,15 @@
 package dev.palmcode.app
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.palmcode.core.ProviderConfigRecord
 import java.security.KeyStore
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
@@ -21,9 +22,15 @@ enum class ThemeMode { System, Light, Dark }
  * to Rust for in-memory use. The key is never written to disk in the clear
  * and never logged (no Log.* usage in this file, by design).
  */
-class ProviderStore(context: Context) {
-
-    private val prefs = context.getSharedPreferences("provider", Context.MODE_PRIVATE)
+class ProviderStore internal constructor(
+    private val prefs: SharedPreferences,
+    private val keyCipher: ApiKeyCipher,
+) {
+    constructor(context: Context) : this(context, "provider")
+    internal constructor(context: Context, preferencesName: String) : this(
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE),
+        KeystoreApiKeyCipher,
+    )
 
     // Load appearance once. Snapshot state updates the root theme immediately;
     // streamed content never reads preferences.
@@ -76,17 +83,50 @@ class ProviderStore(context: Context) {
         get() = prefs.getBoolean("configured", false)
         set(v) = prefs.edit().putBoolean("configured", v).apply()
 
-    val hasApiKey: Boolean get() = prefs.contains("key_blob")
+    var hasApiKey by mutableStateOf(
+        !prefs.getString("key_blob", null).isNullOrEmpty() &&
+            !prefs.getString("key_iv", null).isNullOrEmpty(),
+    )
+        private set
 
-    /** Keystore-encrypt the key and store only the ciphertext. */
-    fun saveApiKey(plain: ByteArray) {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, keystoreKey())
-        val blob = cipher.doFinal(plain)
-        prefs.edit()
-            .putString("key_blob", Base64.encodeToString(blob, Base64.NO_WRAP))
-            .putString("key_iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .apply()
+    /** Encrypt before editing preferences; acknowledge only a durable whole-profile save. */
+    @Synchronized
+    fun save(settings: ProviderSettings, replacementKey: ByteArray? = null) {
+        require(replacementKey == null || replacementKey.isNotEmpty()) { "Empty replacement key" }
+        check(replacementKey != null || hasApiKey) { "API key is required" }
+        // A Keystore failure must not leave a newly saved URL with the old/missing key.
+        val sealed = replacementKey?.let(keyCipher::encrypt)
+        val values = linkedMapOf<String, Any?>(
+            "base_url" to settings.baseUrl,
+            "main_model" to settings.mainModel,
+            "fast_model" to settings.fastModel,
+            "context_window" to settings.contextWindow.toInt(),
+            "max_output_tokens" to settings.maxOutputTokens.toInt(),
+            "sampling_json" to settings.samplingJson,
+            "extra_body_json" to settings.extraBodyJson,
+            "continuous_usage" to settings.continuousUsage,
+            "first_token_secs" to settings.firstTokenSecs.toLong(),
+            "idle_secs" to settings.idleSecs.toLong(),
+            "configured" to (settings.mainModel.isNotBlank() && settings.baseUrl.isNotBlank()),
+        )
+        if (sealed != null) {
+            values["key_blob"] = Base64.getEncoder().encodeToString(sealed.blob)
+            values["key_iv"] = Base64.getEncoder().encodeToString(sealed.iv)
+        }
+        val previous = prefs.all.filterKeys { it in values }
+        try {
+            check(prefs.edit().putValues(values).commit()) { "Provider storage write failed" }
+        } catch (failure: Exception) {
+            // SharedPreferences updates its memory cache even when its disk commit fails.
+            // Restore just our keys, retaining appearance and unrelated preferences.
+            runCatching {
+                val rollback = prefs.edit()
+                values.keys.forEach { rollback.remove(it) }
+                rollback.putValues(previous).commit()
+            }
+            throw failure
+        }
+        hasApiKey = true
     }
 
     /**
@@ -94,13 +134,11 @@ class ProviderStore(context: Context) {
      * after handing it to Rust — the String handed over is an unavoidable
      * JVM heap copy (Rust zeroizes its own buffers on drop).
      */
+    @Synchronized
     fun loadApiKey(): ByteArray? {
         val blobB64 = prefs.getString("key_blob", null) ?: return null
         val ivB64 = prefs.getString("key_iv", null) ?: return null
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val iv = Base64.decode(ivB64, Base64.NO_WRAP)
-        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(128, iv))
-        return cipher.doFinal(Base64.decode(blobB64, Base64.NO_WRAP))
+        return keyCipher.decrypt(SealedApiKey(Base64.getDecoder().decode(blobB64), Base64.getDecoder().decode(ivB64)))
     }
 
     /** Build the FFI record, decrypting the key inline. */
@@ -120,8 +158,20 @@ class ProviderStore(context: Context) {
 
     val cleartext: Boolean get() = baseUrl.startsWith("http://")
 
-    companion object {
+    private object KeystoreApiKeyCipher : ApiKeyCipher {
         private const val ALIAS = "palmcode_api_key"
+
+        override fun encrypt(plain: ByteArray): SealedApiKey {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, keystoreKey())
+            return SealedApiKey(cipher.doFinal(plain), cipher.iv)
+        }
+
+        override fun decrypt(sealed: SealedApiKey): ByteArray {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(128, sealed.iv))
+            return cipher.doFinal(sealed.blob)
+        }
 
         private fun keystoreKey(): javax.crypto.SecretKey {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -140,4 +190,37 @@ class ProviderStore(context: Context) {
             return gen.generateKey()
         }
     }
+}
+
+data class ProviderSettings(
+    val baseUrl: String,
+    val mainModel: String,
+    val fastModel: String = "",
+    val contextWindow: UInt = 128_000u,
+    val maxOutputTokens: UInt = 16_384u,
+    val samplingJson: String? = null,
+    val extraBodyJson: String? = null,
+    val continuousUsage: Boolean = false,
+    val firstTokenSecs: ULong = 120UL,
+    val idleSecs: ULong = 60UL,
+)
+
+internal data class SealedApiKey(val blob: ByteArray, val iv: ByteArray)
+internal interface ApiKeyCipher {
+    fun encrypt(plain: ByteArray): SealedApiKey
+    fun decrypt(sealed: SealedApiKey): ByteArray
+}
+
+private fun SharedPreferences.Editor.putValues(values: Map<String, *>): SharedPreferences.Editor {
+    values.forEach { (key, value) ->
+        when (value) {
+            null -> remove(key)
+            is String -> putString(key, value)
+            is Boolean -> putBoolean(key, value)
+            is Int -> putInt(key, value)
+            is Long -> putLong(key, value)
+            else -> error("Unsupported provider preference type")
+        }
+    }
+    return this
 }
