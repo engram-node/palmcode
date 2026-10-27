@@ -22,6 +22,46 @@ fn exec() -> HostExecutor {
 }
 
 #[test]
+fn restart_sweep_finds_nested_pidfiles_without_touching_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("session");
+    std::fs::create_dir(&session).unwrap();
+    let stale = session.join("bash-interrupted.pid");
+    std::fs::write(&stale, "invalid record\n").unwrap();
+    let unrelated = session.join("other.pid");
+    std::fs::write(&unrelated, "preserve").unwrap();
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+    assert!(!stale.exists());
+    assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "preserve");
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 0);
+}
+
+#[test]
+fn env_sanitization_rejects_provider_and_external_diff_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = env(dir.path());
+    for key in [
+        "PALMCODE_LLM_API_KEY",
+        "PALMCODE_LLM_BASE_URL",
+        "PALMCODE_LLM_MODEL",
+        "GIT_EXTERNAL_DIFF",
+    ] {
+        spec.extra.insert(key.into(), "fixture".into());
+    }
+    spec.extra.insert("PATH".into(), "untrusted".into());
+    let vars = spec.vars();
+    assert!(
+        !vars
+            .iter()
+            .any(|(key, _)| key.starts_with("PALMCODE_LLM_") || key == "GIT_EXTERNAL_DIFF")
+    );
+    assert!(
+        vars.iter()
+            .any(|(key, value)| key == "PATH" && value == &spec.path)
+    );
+}
+
+#[test]
 fn echo_exit_zero_and_output() {
     let dir = tempfile::tempdir().unwrap();
     let mut out = Vec::new();
@@ -281,9 +321,9 @@ fn env_is_not_inherited_from_the_parent() {
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn stale_pidfile_sweep_reaps_the_group() {
+fn restart_orphan_sweep_reaps_the_group() {
     let dir = tempfile::tempdir().unwrap();
-    let pidfile = dir.path().join("run.pid");
+    let pidfile = dir.path().join("bash-restart.pid");
     let mut spec = exec().spec("sleep 30", dir.path(), env(dir.path()));
     spec.timeout = Duration::from_secs(60);
     spec.pidfile = Some(pidfile.clone());
@@ -304,7 +344,7 @@ fn stale_pidfile_sweep_reaps_the_group() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(pid.is_some(), "pidfile never appeared");
-    assert_eq!(sweep_orphans(std::slice::from_ref(&pidfile)), 1);
+    assert_eq!(palmcode_exec::sweep_spill(dir.path()), 1);
     assert!(!pidfile.exists(), "sweep must consume the pidfile");
     let started = Instant::now();
     let res = handle.join().unwrap().unwrap();

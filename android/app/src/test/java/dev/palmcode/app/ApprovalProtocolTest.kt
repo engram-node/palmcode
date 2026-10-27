@@ -21,4 +21,14 @@ class ApprovalProtocolTest {
         assertNull(resolve("once", session = "other"))
         assertNull(resolve("once", nonce = "previous-process"))
     }
+
+    @Test fun notificationActionsCannotCrossSessionsOrProcessNonces() {
+        for (action in listOf("once", "session", "deny")) {
+            assertNull(resolve(action, session = null))
+            assertNull(resolve(action, nonce = null))
+            assertNull(resolve(action, id = ULong.MAX_VALUE))
+            assertNull(resolve(action, nonce = ""))
+            assertNull(resolve(action, session = "s-other"))
+        }
+    }
 }

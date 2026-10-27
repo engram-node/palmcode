@@ -14,6 +14,123 @@ impl EventSink for Collector {
         self.0.lock().unwrap().extend(events);
     }
 }
+
+#[test]
+fn interrupted_bash_resume_never_replays_the_persisted_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = workspace_with(&[("keep.txt", "unchanged")]);
+    let db = dir.path().join("resume.db");
+    let (session, assistant) = {
+        let store = palmcode_store::Store::open(&db).unwrap();
+        let session = store.new_session("interrupted bash", "").unwrap().id;
+        let user = store.begin_message(&session, "user", false).unwrap();
+        store
+            .put_part(
+                &session,
+                user,
+                "text",
+                "Inspect the workspace before continuing",
+            )
+            .unwrap();
+        let assistant = store.begin_message(&session, "assistant", true).unwrap();
+        store
+            .tool_call_started(
+                &session,
+                assistant,
+                "old-bash",
+                "bash",
+                r#"{"command":"printf replayed > replay.txt"}"#,
+            )
+            .unwrap();
+        store.set_status(&session, "streaming").unwrap();
+        (session, assistant)
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: text_with_usage("Inspected; prior outcome unknown", 100, 5),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let engine = Engine::start(&db, collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    engine.resume(&session).unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::MessageFinished { .. }),
+        "resumed message",
+    );
+    assert_eq!(
+        collector.count(|e| matches!(e, Event::ToolStarted { .. })),
+        0
+    );
+    assert!(!ws.path().join("replay.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("keep.txt")).unwrap(),
+        "unchanged"
+    );
+    let transcript = engine.transcript(&session).unwrap();
+    let old = transcript
+        .iter()
+        .find(|m| m.message_id == assistant)
+        .unwrap();
+    assert!(old.interrupted);
+    assert_eq!(old.tools[0].status, "interrupted");
+    assert!(old.tools[0].output.contains("unknown"));
+    engine.shutdown();
+}
+
+#[test]
+fn request_metrics_report_mock_usage_without_wire_content() {
+    struct Diagnostics {
+        events: Collector,
+        metrics: Mutex<Vec<palmcode_agent::RequestMetrics>>,
+    }
+    impl EventSink for Diagnostics {
+        fn on_batch(&self, events: Vec<Event>) {
+            self.events.on_batch(events);
+        }
+        fn on_request_metrics(&self, metrics: palmcode_agent::RequestMetrics) {
+            self.metrics.lock().unwrap().push(metrics);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: text_with_usage("answer", 120, 7),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let sink = Arc::new(Diagnostics {
+        events: Collector(Mutex::new(vec![])),
+        metrics: Mutex::new(vec![]),
+    });
+    let engine = Engine::start(&dir.path().join("metrics.db"), sink.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let session = engine.create_session("metrics").unwrap();
+    engine.send(&session.id, "hello").unwrap();
+    wait_for(
+        &sink.events,
+        |e| matches!(e, Event::MessageFinished { .. }),
+        "metrics completion",
+    );
+    let metrics = sink.metrics.lock().unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(metrics[0].ok);
+    assert_eq!(metrics[0].prompt_tokens, Some(120));
+    assert_eq!(metrics[0].completion_tokens, Some(7));
+    assert_eq!(metrics[0].cached_tokens, None);
+    assert_eq!(metrics[0].retries, Some(0));
+}
 impl Collector {
     fn has(&self, pred: impl Fn(&Event) -> bool) -> bool {
         self.0.lock().unwrap().iter().any(pred)
