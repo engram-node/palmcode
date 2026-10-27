@@ -5,6 +5,15 @@ The host needs sh, awk, sed, find, xargs, grep, sort, cmp, diff, tar and git
 on PATH (MSYS2 on Windows). All tool/verifier children use HostExecutor.
 On Windows, put the MSYS2 `usr/bin` directory ahead of system sh/git on
 the process PATH so nested shells resolve to the same host userland.
+Keep MinGW before MSYS utilities for the Windows GNU C toolchain. For the
+pinned installation, use this process-local setup before building:
+
+```powershell
+$env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"
+$env:CC = 'C:\msys64\mingw64\bin\gcc.exe'
+$env:CXX = 'C:\msys64\mingw64\bin\g++.exe'
+```
+
 The git fixture uses `git diff --no-ext-diff --no-textconv` because the
 executor deliberately disables external diff programs.
 

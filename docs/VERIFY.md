@@ -3,6 +3,10 @@
 What has actually been run, and where. Claims anywhere else in this repo are
 unverified unless listed here.
 
+Current M2/M3 criterion-by-criterion status: [closure table](M2_M3_CLOSURE.md)
+(2026-10-27). Acceptance remains partial; dated historical results below do
+not waive the current missing or manual-device checks.
+
 **Claim discipline:** an ABI/devices claim only counts as verified when it
 ran on *physical* hardware, listed below with date. Emulator results are
 called out as emulator-only.
@@ -488,3 +492,63 @@ CI check; local A/B verification covered BusyBox binaries.
   standby, live bash scrolling/Kill and self-test checks remain unchanged.
   Run-as launch is unverified. M2/M3 acceptance remains partial until those
   and the sandbox-blocked checks pass. Deferred work remains untouched.
+
+## Stage 4 bash benchmark and named test gaps (2026-10-27)
+
+- DONE: `dd01e08` adds `bash_bench`: fifteen deterministic task fixtures,
+  paired trusted-workspace approval modes, the existing Engine/tools and
+  HostExecutor, deterministic verifiers, numeric-only traces, per-request
+  usage/latency/cache metrics and repeat spread. See BASH_BENCH.md / ADR 0029.
+- DONE: ten offline benchmark tests pass, including all reference solutions,
+  rejection of every unsolved fixture, altered-test rejection, recovery-event
+  requirements, optional usage/cache handling, quantiles and trace overwrite
+  refusal. Windows checks used MSYS2 usr/bin before system sh/git on PATH.
+  The git fixture uses built-in diff flags because external diff helpers
+  are deliberately disabled by the executor; the catalog documents them.
+- DONE: `cargo build --release -p palmcode-bench --bin bash_bench` and
+  `target/release/bash_bench.exe --list` pass without provider configuration.
+  A fresh Windows build initially selected MSYS gcc and failed to link;
+  rebuilding with MinGW first on PATH and explicit MinGW `CC`/`CXX` passed.
+  BASH_BENCH.md records the tested process-local toolchain setup. This was
+  a build/listing smoke check, not a live benchmark run.
+- DONE: new `interrupted_bash_resume_never_replays_the_persisted_command`
+  seeds an interrupted bash intent, restarts, resumes through a local mock,
+  preserves an unknown-outcome card and emits no new tool execution.
+  `request_metrics_report_mock_usage_without_wire_content` validates the
+  numeric request callback against the local mock. No live provider is used.
+  These named test gaps are committed in `c145b07`.
+- DONE: new executor tests cover rejected provider/git environment overrides
+  and nested restart pidfile discovery/idempotence without touching unrelated
+  files. The Linux/Android real orphan test now exercises the restart
+  `sweep_spill` entrypoint, not just a hand-supplied pidfile list.
+- DONE: final `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --no-run`, and `cargo deny check` pass.
+  Advisory, ban, license and source checks passed using the existing
+  advisory-database cache/lock. No dependency source/vendor drop was made.
+- PARTIAL: `cargo test --workspace --exclude palmcode-exec -- --test-threads=1 --skip crash_tests --skip timeout_kills_the_tree_fast`
+  passes 178 selected tests plus doctests; three tests were filtered.
+  Provider environment variables were removed from test processes.
+- UNRUN for acceptance: `cargo test -p palmcode-exec -- --test-threads=1`
+  was capped at 60 seconds. Four unit tests passed. Cancellation failed;
+  eleven integration tests passed before the grandchild-timeout test
+  stalled. Those passing tests include cap/spill/drain, environment checks
+  and the new restart discovery test. The verified test/cargo process tree
+  was terminated; some nested shells resisted Windows termination. The
+  complete exec/crash/timeout gates remain for an unrestricted host/device.
+- DONE: `gradlew.bat :android:app:assembleDebug :android:app:assembleBench :android:app:assembleRelease :android:app:testDebugUnitTest :android:app:testBenchUnitTest :android:app:lintVitalRelease`
+  passes. The new notification session/nonce isolation regression passes
+  in both JVM variants (6 debug tests / 7 bench tests, no failures/skips).
+  Packaged release DEX contains no BenchActivity,
+  BenchService, BenchUiActivity or BenchInstrumentation. No device commands
+  or UI interaction were used in Stage 4.
+- UNRUN: live bash benchmark, as explicitly reserved for the maintainer.
+  No pass rate, cache rate or ASKS performance result has been invented.
+  gitleaks is absent from PATH, so the commit-hook secret scan is skipped;
+  no history scan was attempted.
+- PARTIAL: M2/M3 closure is documented in M2_M3_CLOSURE.md. The separate
+  original spec is unavailable in the supplied context/targeted milestone
+  documents; the table identifies that traceability gap and inventories all
+  recoverable ADR 0011 / M3 contracts and supplied Stage 2/3 requirements.
+  Missing implementation and missing measurement are distinguished from
+  PENDING-DEVICE rows. All maintainer manual rows remain pending.
