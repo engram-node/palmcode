@@ -945,3 +945,13 @@ and `Get-FileHash android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
 PENDING-DEVICE: owner-provider retry of the affected prompt. No live request,
 provider edit, data clear, uninstall or device-setting change was performed.
 Old empty turns are retained; no previously dropped tool call is replayed.
+
+## 2026-10-29: compact Markdown headings
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(existing 15 Android JVM tests) and
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+Markdown H1-H6 now use 22/20/18/16/16/14 sp semibold styles instead of the
+Material display/headline scale. Paragraphs, lists, code and app typography
+retain their existing styles. No new tests for this typography-only change.
+PENDING-DEVICE: owner visual review; app not opened and no provider request sent.

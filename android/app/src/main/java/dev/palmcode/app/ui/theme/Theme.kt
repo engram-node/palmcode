@@ -18,12 +18,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextDecoration
 import com.mikepenz.markdown.model.DefaultMarkdownColors
@@ -161,8 +163,12 @@ fun PalmcodeTheme(
                 tableBackground = colors.surfaceContainer,
             ),
             markdownTypography = DefaultMarkdownTypography(
-                h1 = type.displayLarge, h2 = type.displayMedium, h3 = type.displaySmall,
-                h4 = type.headlineMedium, h5 = type.headlineSmall, h6 = type.titleLarge,
+                h1 = type.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                h2 = type.titleLarge.copy(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
+                h3 = type.titleMedium.copy(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+                h4 = type.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                h5 = type.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                h6 = type.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                 text = type.bodyLarge,
                 code = type.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = colors.onSurface),
                 inlineCode = type.bodyLarge.copy(fontFamily = FontFamily.Monospace, color = colors.onSurface),
