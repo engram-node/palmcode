@@ -203,6 +203,43 @@ fn sse_stream(tokens: &[&str]) -> Vec<u8> {
 }
 
 #[test]
+fn full_message_sse_response_is_displayed_and_saved() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body = b"data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Here is the response\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":4}}\n\ndata: [DONE]\n\n".to_vec();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::start(&dir.path().join("response.db"), collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let session = engine.create_session("Response fixture").unwrap();
+    let mid = engine.send(&session.id, "Say hello").unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "reply",
+    );
+    assert!(collector.snapshot().iter().any(|event| matches!(event, Event::TextDelta { snapshot, .. } if snapshot == "Here is the response")));
+    let transcript = engine.transcript(&session.id).unwrap();
+    assert_eq!(
+        transcript
+            .iter()
+            .find(|m| m.message_id == mid)
+            .unwrap()
+            .text,
+        "Here is the response"
+    );
+    engine.shutdown();
+}
+
+#[test]
 fn send_stream_finish_persist() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let server = rt

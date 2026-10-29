@@ -14,6 +14,113 @@ use palmcode_llm::types::Message;
 
 const OK_SSE: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
 
+#[tokio::test]
+async fn full_message_and_text_parts_reach_client_text_events() {
+    for choice in [
+        serde_json::json!({"message":{"content":"Hello there"},"finish_reason":"stop"}),
+        serde_json::json!({"delta":{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"there"}]},"finish_reason":"stop"}),
+    ] {
+        let body = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[choice]})
+        )
+        .into_bytes();
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = client(&server, timeouts(2000, 2000));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        c.chat(&req(), tx).await.unwrap();
+        let mut text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "Hello there");
+    }
+}
+
+#[tokio::test]
+async fn final_full_message_does_not_duplicate_streamed_text() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"message\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello");
+}
+
+#[tokio::test]
+async fn final_full_message_completes_a_partial_delta() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"message\":{\"content\":\"Hello there\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello there");
+}
+
+#[tokio::test]
+async fn usage_only_response_is_an_explicit_error_without_retry_or_first_token() {
+    let body = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":34}}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(
+        matches!(c.chat(&req(), tx).await, Err(LlmError::Decode(message)) if message.contains("no response text"))
+    );
+    assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(
+            event,
+            palmcode_llm::client::ClientEvent::FirstToken { .. }
+        ));
+    }
+}
+
 fn timeouts(first_ms: u64, idle_ms: u64) -> Timeouts {
     Timeouts {
         first_token: Duration::from_millis(first_ms),

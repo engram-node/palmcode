@@ -140,6 +140,8 @@ pub struct Usage {
 #[derive(Debug, Clone, Default)]
 pub struct Chunk {
     pub text: Option<String>,
+    /// Some compatible endpoints send a complete message inside the SSE stream.
+    pub full_message: bool,
     pub reasoning: Option<(ReasoningField, String)>,
     pub tool_deltas: Vec<ToolCallDelta>,
     pub finish_reason: Option<String>,
@@ -186,16 +188,30 @@ pub fn parse_chunk(payload: &str) -> Result<Option<Chunk>, crate::error::LlmErro
         });
     }
 
-    let delta = v
+    let choice = v
         .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("delta"));
+        .and_then(|c| c.first());
+    let delta = choice.and_then(|c| c.get("delta")).filter(|d| !d.is_null());
+    let message = choice
+        .and_then(|c| c.get("message"))
+        .filter(|m| !m.is_null());
+    let delta_has_payload = delta.is_some_and(|d| {
+        ["content", "reasoning_content", "reasoning", "tool_calls"]
+            .iter()
+            .any(|key| d.get(key).is_some_and(|v| !v.is_null()))
+    });
+    let delta = if !delta_has_payload && message.is_some() {
+        chunk.full_message = true;
+        message
+    } else {
+        delta
+    };
     if let Some(delta) = delta {
-        if let Some(t) = delta.get("content").and_then(|c| c.as_str())
+        if let Some(t) = delta.get("content").and_then(content_text)
             && !t.is_empty()
         {
-            chunk.text = Some(t.to_string());
+            chunk.text = Some(t);
         }
         // Reasoning: `reasoning_content` (majority) or bare `reasoning`.
         for (key, field) in [
@@ -239,6 +255,41 @@ pub fn parse_chunk(payload: &str) -> Result<Option<Chunk>, crate::error::LlmErro
     }
 
     Ok(Some(chunk))
+}
+
+fn content_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    let parts = value.as_array()?;
+    let mut text = String::new();
+    for part in parts {
+        if part.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(value) = part.get("text").and_then(|v| v.as_str())
+        {
+            text.push_str(value);
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod response_shape_tests {
+    use super::*;
+
+    #[test]
+    fn full_message_in_sse_keeps_response_text() {
+        let chunk = parse_chunk(r#"{"choices":[{"message":{"role":"assistant","content":"Hello there"},"finish_reason":"stop"}]}"#).unwrap().unwrap();
+        assert_eq!(chunk.text.as_deref(), Some("Hello there"));
+        assert!(chunk.full_message);
+    }
+
+    #[test]
+    fn text_parts_are_combined_without_treating_images_as_text() {
+        let chunk = parse_chunk(r#"{"choices":[{"delta":{"content":[{"type":"text","text":"Hello "},{"type":"image_url","image_url":{"url":"ignored"}},{"type":"text","text":"there"}]}}]}"#).unwrap().unwrap();
+        assert_eq!(chunk.text.as_deref(), Some("Hello there"));
+        assert!(!chunk.full_message);
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -851,3 +851,36 @@ titles. New chats start as New chat; successful replies trigger queued optional
 summary requests, and existing numbered chats are backfilled while idle.
 PENDING-DEVICE: real-provider title generation and one-line list rendering.
 The new app was not launched against owner credentials during validation.
+
+## 2026-10-29: response-less assistant turns
+
+FAIL reproduced on motorola edge 50 neo, Android 16, installed debug 7b03a19:
+`adb exec-out uiautomator dump /dev/tty` showed an assistant metrics line and no
+response text. Only control bounds, character counts and numeric metrics were
+printed; existing conversation text was suppressed. Read-only RAM snapshots via
+`adb exec-out run-as dev.palmcode cat files/palmcode.db` and the corresponding
+`files/palmcode.db-wal`, replaying committed WAL pages in RAM, then querying
+`SELECT m.id,m.role,m.tokens,m.streaming,p.kind,length(p.content) FROM messages m LEFT JOIN parts p ON p.message_id=m.id ORDER BY m.id DESC LIMIT 12`
+confirmed the latest three assistant turns had token counts but no parts.
+No database snapshot, prompt, endpoint or credential was written to host disk.
+The upstream envelope shape was not captured and remains unverified.
+
+PASS: `cargo fmt -p palmcode-llm -p palmcode-agent --check`;
+`cargo clippy -p palmcode-llm -p palmcode-agent --all-targets -- -D warnings`;
+`cargo test -p palmcode-llm -p palmcode-agent -- --skip live_probe_and_chat`
+from core/. 75 tests passed. The subprocess helper is intentionally ignored as
+an independent test and invoked by its parent test; the live probe was filtered.
+Seven new regressions cover full-message SSE, typed text arrays, avoiding repeated
+snapshot text, appending a snapshot's missing suffix, explicit usage-only errors
+without retries or fake FirstToken, and engine delivery/persistence of text.
+Historical empty turns now have an explanatory label instead of metrics alone.
+PENDING-DEVICE: successful response text from the owner's endpoint after retry;
+old missing text cannot be reconstructed from token counts. No live request was
+sent during this fix, and neither provider settings nor power settings changed.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(15 Android JVM tests, zero failures) and
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+The installed debug APK includes the preceding title feature and this response
+fix. App deliberately left closed: opening it may start title backfill requests.
+No uninstall, data clear, provider edit or device-setting change was performed.

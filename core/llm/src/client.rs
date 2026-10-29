@@ -408,6 +408,9 @@ impl Client {
         let mut stream = response.bytes_stream();
         let mut saw_finish = false;
         let mut saw_done = false;
+        let mut response_text = String::new();
+        let mut reasoning_bytes = 0usize;
+        let mut tool_deltas = 0usize;
         loop {
             // Before the first SSE byte the per-read budget is whatever
             // remains of the first-token timeout; after it, the idle-stall
@@ -437,13 +440,15 @@ impl Client {
                     saw_done = true;
                     continue;
                 }
-                if outcome.ttft.is_none() {
-                    let ttft = t0.elapsed();
-                    outcome.ttft = Some(ttft);
-                    let _ = tx.send(ClientEvent::FirstToken { ttft });
-                }
                 let chunk = types::parse_chunk(&payload).map_err(no_ra)?;
                 if let Some(c) = chunk {
+                    if outcome.ttft.is_none()
+                        && (c.text.is_some() || c.reasoning.is_some() || !c.tool_deltas.is_empty())
+                    {
+                        let ttft = t0.elapsed();
+                        outcome.ttft = Some(ttft);
+                        let _ = tx.send(ClientEvent::FirstToken { ttft });
+                    }
                     if c.has_usage_object {
                         outcome.usage_chunks += 1;
                     }
@@ -452,13 +457,26 @@ impl Client {
                         let _ = tx.send(ClientEvent::Usage(u));
                     }
                     if let Some((field, text)) = &c.reasoning {
+                        reasoning_bytes += text.len();
                         outcome.reasoning_field = Some(*field);
                         let _ = tx.send(ClientEvent::Reasoning(*field, text.clone()));
                     }
                     if let Some(t) = &c.text {
-                        let _ = tx.send(ClientEvent::Text(t.clone()));
+                        let delta = if c.full_message {
+                            // A terminal full message can repeat or complete the
+                            // text already streamed. Append only its missing tail.
+                            t.strip_prefix(&response_text).unwrap_or("")
+                        } else {
+                            t.as_str()
+                        };
+                        if !delta.is_empty() {
+                            let delta = delta.to_owned();
+                            response_text.push_str(&delta);
+                            let _ = tx.send(ClientEvent::Text(delta));
+                        }
                     }
                     if !c.tool_deltas.is_empty() {
+                        tool_deltas += c.tool_deltas.len();
                         for d in &c.tool_deltas {
                             acc.push(d);
                         }
@@ -478,6 +496,22 @@ impl Client {
         let _calls = acc.finish(); // M1: accumulator warm, no tools executed
         if outcome.finish_reason.is_empty() {
             outcome.finish_reason = "stop".into();
+        }
+        let finish = match outcome.finish_reason.as_str() {
+            "stop" => "stop",
+            "length" => "length",
+            "tool_calls" => "tool_calls",
+            "content_filter" => "content_filter",
+            _ => "other",
+        };
+        let text_bytes = response_text.len();
+        palmcode_telemetry::alog(&format!(
+            "STREAM text_bytes={text_bytes} reasoning_bytes={reasoning_bytes} tool_deltas={tool_deltas} finish={finish}"
+        ));
+        if response_text.trim().is_empty() && reasoning_bytes == 0 && tool_deltas == 0 {
+            return Err(no_ra(LlmError::Decode(format!(
+                "Provider returned no response text, reasoning or tool calls (finish: {finish})"
+            ))));
         }
         Ok(outcome)
     }

@@ -237,6 +237,11 @@ internal fun MessageBubble(sessionId: String, msg: ChatMsg) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                msg.reasoning.isEmpty() && msg.tools.isEmpty() && msg.error == null && !msg.interrupted -> Text(
+                    "No response text was received for this turn.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             if (msg.tools.isNotEmpty()) {
                 Column(
