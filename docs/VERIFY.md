@@ -884,3 +884,33 @@ PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug -
 The installed debug APK includes the preceding title feature and this response
 fix. App deliberately left closed: opening it may start title backfill requests.
 No uninstall, data clear, provider edit or device-setting change was performed.
+
+## 2026-10-29: incomplete tool replies and stream termination
+
+FAIL on installed debug 44e74bf, motorola edge 50 neo, Android 16:
+`adb logcat -d -t 20000 -s palmcode:I`, parsed in host RAM to print only
+whitelisted numeric stream lines, showed three responses with
+`text_bytes=0 reasoning_bytes=0 tool_deltas=1 finish=stop`.
+Read-only in-memory database metadata inspection confirmed their assistant
+messages had token counts but no parts. No raw response envelopes were saved;
+the exact reason for the incomplete fragments remains unverified.
+
+PASS from core/:
+`cargo fmt -p palmcode-llm -p palmcode-agent --check`;
+`cargo clippy -p palmcode-llm -p palmcode-agent --all-targets -- -D warnings`;
+`cargo test -p palmcode-llm -p palmcode-agent -- --skip live_probe_and_chat`;
+then `cargo test -p palmcode-agent --test engine_mock incomplete_tool_only_reply`
+after adding the end-to-end regression. Five new tests verify EOF-flushed text,
+EOF-flushed tool names, immediate termination on [DONE] with an open body,
+empty/whitespace tool-name rejection without retries, and persistence of an
+incomplete-tool error instead of an empty MessageFinished success.
+Existing non-live tests pass; the live probe was excluded. The independently
+ignored subprocess helper continues to be invoked by its parent test.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(15 JVM tests, zero failures), then
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+Provider configuration, keys, workspaces and device settings preserved.
+PENDING-DEVICE: owner retry against the configured provider; no live request was
+sent by the agent. New STREAM diagnostics include only counts of function-name
+fragments, complete calls and EOF-flushed events, never their contents.

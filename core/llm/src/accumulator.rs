@@ -63,7 +63,7 @@ impl ToolAccumulator {
     pub fn finish(self) -> Vec<ToolCallSpec> {
         let mut out: Vec<ToolCallSpec> = Vec::new();
         let mut push = |b: Building| {
-            if b.name.is_empty() {
+            if b.name.trim().is_empty() {
                 return;
             }
             out.push(ToolCallSpec {

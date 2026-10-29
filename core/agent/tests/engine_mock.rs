@@ -240,6 +240,49 @@ fn full_message_sse_response_is_displayed_and_saved() {
 }
 
 #[test]
+fn incomplete_tool_only_reply_is_saved_as_an_error_not_an_empty_success() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0}]},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":14}}\n\ndata: [DONE]\n\n".to_vec();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::start(&dir.path().join("incomplete.db"), collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let session = engine.create_session("Incomplete tool fixture").unwrap();
+    let mid = engine.send(&session.id, "Inspect a file").unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::TurnError { message_id: Some(id), .. } if *id == mid),
+        "incomplete tool error",
+    );
+    let events = collector.snapshot();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid))
+    );
+    let transcript = engine.transcript(&session.id).unwrap();
+    let reply = transcript.iter().find(|m| m.message_id == mid).unwrap();
+    assert!(
+        reply
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("incomplete tool call")
+    );
+    assert!(reply.tools.is_empty());
+    engine.shutdown();
+}
+
+#[test]
 fn send_stream_finish_persist() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let server = rt

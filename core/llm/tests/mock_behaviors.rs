@@ -15,6 +15,100 @@ use palmcode_llm::types::Message;
 const OK_SSE: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
 
 #[tokio::test]
+async fn unterminated_final_sse_event_delivers_the_response() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Here is the answer\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":14}}".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Here is the answer");
+}
+
+#[tokio::test]
+async fn done_ends_the_response_without_waiting_for_socket_close() {
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body: OK_SSE.to_vec(),
+            hang_after_body: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 100));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // The server deliberately keeps the response open. Waiting for EOF would
+    // hit the idle timeout even though the provider already sent [DONE].
+    c.chat(&req(), tx).await.unwrap();
+}
+
+#[tokio::test]
+async fn nameless_tool_stub_is_an_error_without_retry() {
+    for name in ["", "   "] {
+        let payload = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":name,"arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"completion_tokens":14}});
+        let body = format!("data: {payload}\n\ndata: [DONE]\n\n").into_bytes();
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = client(&server, timeouts(2000, 2000));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            matches!(c.chat(&req(), tx).await, Err(LlmError::Decode(message)) if message.contains("incomplete tool call"))
+        );
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn tool_stub_followed_by_final_unterminated_name_is_a_valid_call() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\"}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut acc = palmcode_llm::accumulator::ToolAccumulator::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Tools(deltas) = event {
+            for delta in deltas {
+                acc.push(&delta);
+            }
+        }
+    }
+    let calls = acc.finish();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "read");
+}
+
+#[tokio::test]
 async fn full_message_and_text_parts_reach_client_text_events() {
     for choice in [
         serde_json::json!({"message":{"content":"Hello there"},"finish_reason":"stop"}),

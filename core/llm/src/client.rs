@@ -411,7 +411,9 @@ impl Client {
         let mut response_text = String::new();
         let mut reasoning_bytes = 0usize;
         let mut tool_deltas = 0usize;
-        loop {
+        let mut tool_name_deltas = 0usize;
+        let mut eof_events = 0usize;
+        'stream: loop {
             // Before the first SSE byte the per-read budget is whatever
             // remains of the first-token timeout; after it, the idle-stall
             // timeout applies between chunks.
@@ -423,10 +425,14 @@ impl Client {
             } else {
                 self.timeouts.idle
             };
-            let item = match tokio::time::timeout(budget, stream.next()).await {
-                Ok(Some(Ok(bytes))) => bytes,
+            let (payloads, eof) = match tokio::time::timeout(budget, stream.next()).await {
+                Ok(Some(Ok(bytes))) => (parser.feed(&bytes), false),
                 Ok(Some(Err(e))) => return Err(no_ra(self.net_err(e))),
-                Ok(None) => break, // server closed the socket
+                Ok(None) => {
+                    let pending = std::mem::take(&mut parser).finish();
+                    eof_events = pending.len();
+                    (pending, true)
+                }
                 Err(_) => {
                     return Err(no_ra(if outcome.ttft.is_none() {
                         LlmError::FirstTokenTimeout(self.timeouts.first_token.as_secs())
@@ -435,10 +441,10 @@ impl Client {
                     }));
                 }
             };
-            for payload in parser.feed(&item) {
+            for payload in payloads {
                 if payload.trim() == "[DONE]" {
                     saw_done = true;
-                    continue;
+                    break 'stream;
                 }
                 let chunk = types::parse_chunk(&payload).map_err(no_ra)?;
                 if let Some(c) = chunk {
@@ -477,6 +483,11 @@ impl Client {
                     }
                     if !c.tool_deltas.is_empty() {
                         tool_deltas += c.tool_deltas.len();
+                        tool_name_deltas += c
+                            .tool_deltas
+                            .iter()
+                            .filter(|d| d.name.as_ref().is_some_and(|name| !name.trim().is_empty()))
+                            .count();
                         for d in &c.tool_deltas {
                             acc.push(d);
                         }
@@ -488,12 +499,15 @@ impl Client {
                     }
                 }
             }
+            if eof {
+                break;
+            }
         }
         // tolerate a missing [DONE] only when a finish_reason was seen
         if !saw_done && !saw_finish {
             return Err(no_ra(LlmError::PrematureEof));
         }
-        let _calls = acc.finish(); // M1: accumulator warm, no tools executed
+        let calls = acc.finish();
         if outcome.finish_reason.is_empty() {
             outcome.finish_reason = "stop".into();
         }
@@ -506,9 +520,15 @@ impl Client {
         };
         let text_bytes = response_text.len();
         palmcode_telemetry::alog(&format!(
-            "STREAM text_bytes={text_bytes} reasoning_bytes={reasoning_bytes} tool_deltas={tool_deltas} finish={finish}"
+            "STREAM text_bytes={text_bytes} reasoning_bytes={reasoning_bytes} tool_deltas={tool_deltas} finish={finish} tool_names={tool_name_deltas} complete_calls={} eof_events={eof_events}",
+            calls.len()
         ));
-        if response_text.trim().is_empty() && reasoning_bytes == 0 && tool_deltas == 0 {
+        if response_text.trim().is_empty() && reasoning_bytes == 0 && calls.is_empty() {
+            if tool_deltas > 0 {
+                return Err(no_ra(LlmError::Decode(
+                    "Provider sent an incomplete tool call without a function name. No tool was executed; retry the message.".into()
+                )));
+            }
             return Err(no_ra(LlmError::Decode(format!(
                 "Provider returned no response text, reasoning or tool calls (finish: {finish})"
             ))));
