@@ -252,6 +252,116 @@ fn workspace_with(files: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 #[test]
+fn stop_labeled_tool_after_normal_replies_runs_and_persists_a_card_and_answer() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_READ))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![
+        text_with_usage("Hello", 20, 2),
+        text_with_usage("Ready", 30, 2),
+        tool,
+        fixture("tool_result_followup.sse", FOLLOWUP),
+    ]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Tool after chat").unwrap();
+    for prompt in ["Hello", "Ready?", "Read src/main.rs"] {
+        let mid = engine.send(&session.id, prompt).unwrap();
+        wait_for(
+            c,
+            |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+            "completed reply",
+        );
+    }
+    assert!(c.has(|event| matches!(event, Event::ToolStarted { name, .. } if name == "read")));
+    assert!(c.has(|event| matches!(event, Event::ToolFinished { ok: true, .. })));
+    let transcript = engine.transcript(&session.id).unwrap();
+    let reply = transcript.last().unwrap();
+    assert!(!reply.text.is_empty());
+    assert_eq!(reply.tools.len(), 1);
+    assert_eq!(reply.tools[0].name, "read");
+    assert_eq!(reply.tools[0].status, "done");
+    assert_eq!(c.count(|event| matches!(event, Event::TurnError { .. })), 0);
+}
+
+#[test]
+fn stop_labeled_write_still_requires_approval_and_respects_denial() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_WRITE))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![tool, text_with_usage("Write denied", 40, 3)]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("src/main.rs", "untouched\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Approval regression").unwrap();
+    let mid = engine.send(&session.id, "Change the file").unwrap();
+    wait_for(
+        c,
+        |event| matches!(event, Event::ApprovalRequested { request_id: 1, .. }),
+        "approval",
+    );
+    engine.resolve_approval(1, false, ApprovalScope::Once);
+    wait_for(
+        c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "completed reply",
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("src/main.rs")).unwrap(),
+        "untouched\n"
+    );
+    assert!(c.has(|event| matches!(
+        event,
+        Event::ApprovalResolved {
+            approved: false,
+            ..
+        }
+    )));
+    assert!(c.has(|event| matches!(event, Event::ToolFinished { ok: false, .. })));
+}
+
+#[test]
+fn stop_labeled_call_without_workspace_explains_missing_tools() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_READ))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![tool]);
+    let Rig { c, engine, .. } = &rig;
+    let session = engine.create_session("No workspace").unwrap();
+    let mid = engine.send(&session.id, "Read a file").unwrap();
+    wait_for(
+        c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "completed reply",
+    );
+    let transcript = engine.transcript(&session.id).unwrap();
+    assert!(
+        transcript
+            .last()
+            .unwrap()
+            .text
+            .contains("no workspace is connected")
+    );
+    assert_eq!(
+        c.count(|event| matches!(event, Event::ToolStarted { .. })),
+        0
+    );
+}
+
+#[test]
 fn read_tool_executes_and_loops_to_answer() {
     let rig = setup(vec![
         fixture("tool_call.sse", TOOL_CALL_READ),

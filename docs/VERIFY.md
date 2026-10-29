@@ -914,3 +914,34 @@ Provider configuration, keys, workspaces and device settings preserved.
 PENDING-DEVICE: owner retry against the configured provider; no live request was
 sent by the agent. New STREAM diagnostics include only counts of function-name
 fragments, complete calls and EOF-flushed events, never their contents.
+
+## 2026-10-29: stop-labeled valid tool calls
+
+FAIL reproduced on motorola edge 50 neo, Android 16, installed debug 364c478:
+`adb logcat -d -t 10000 -s palmcode:I`, filtered in RAM to numeric timing and
+stream fields, showed two streams with
+`text_bytes=0 reasoning_bytes=0 tool_deltas=1 finish=stop tool_names=1 complete_calls=1 eof_events=0`.
+`adb exec-out uiautomator dump /dev/tty`, parsed in memory to print only lengths,
+control bounds and the empty-label boolean, confirmed two empty-response labels.
+Read-only in-memory database metadata showed two newly completed textless turns
+following successful textual turns. No provider envelopes or message text were
+printed. Unlike the earlier assumption, the calls were complete: the agent's
+strict `finish_reason == tool_calls` dispatch condition discarded them.
+
+PASS from core/: `cargo fmt -p palmcode-agent --check`,
+`cargo clippy -p palmcode-agent --all-targets -- -D warnings`,
+`cargo test -p palmcode-agent` (38 passing tests; subprocess helper independently
+ignored and invoked by its parent). Three new regressions reproduce two normal
+replies followed by a stop-labeled read call with a saved card and follow-up
+answer, verify write approval/denial, and verify the missing-workspace explanation.
+The dispatch fix uses accumulated calls and preserves the existing tool policy.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(15 Android JVM tests, zero failures), then
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+The installed APK SHA-256 was compared with the completed host build using
+`adb shell pm path dev.palmcode`, `adb shell sha256sum <returned-base-apk-path>`
+and `Get-FileHash android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+PENDING-DEVICE: owner-provider retry of the affected prompt. No live request,
+provider edit, data clear, uninstall or device-setting change was performed.
+Old empty turns are retained; no previously dropped tool call is replayed.

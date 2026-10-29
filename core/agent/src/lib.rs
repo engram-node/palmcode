@@ -1534,7 +1534,10 @@ async fn run_turn(task: TurnTask) {
                 Err(e) => break Err(e),
             };
 
-            let wants_tools = out.finish_reason == "tool_calls" && !flow.tool_calls.is_empty();
+            // Compatible providers may label a completed function-call response
+            // as "stop". The accumulated calls are authoritative; do not drop
+            // them merely because the provider used a different finish label.
+            let wants_tools = !flow.tool_calls.is_empty();
             match (wants_tools, &tools) {
                 (true, Some(ctx)) => {
                     if !full_text.ends_with('\n') && !full_text.is_empty() {
