@@ -20,6 +20,7 @@ import dev.palmcode.core.messageSend
 import dev.palmcode.core.providerConfigure
 import dev.palmcode.core.sessionTranscript
 import dev.palmcode.core.sessionsCreate
+import dev.palmcode.core.sessionsSummarize
 import dev.palmcode.core.sessionSetAcceptEdits
 import dev.palmcode.core.sessionsList
 import dev.palmcode.core.turnResume
@@ -32,6 +33,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 sealed interface Screen {
@@ -221,6 +225,9 @@ object CoreManager {
     private lateinit var appContext: Context
     private val runs = RunTracker()
     private val runScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val titleMutex = Mutex()
+    private val titleAttempts = mutableSetOf<String>()
+    private var providerReady = false
     val activeRuns: Set<String> get() = runs.active
     var appVisible = false
         private set
@@ -258,7 +265,11 @@ object CoreManager {
                 AppState.apply(events)
                 for (event in events) {
                     when (event) {
-                        is CoreEvent.MessageFinished -> finishRun(event.sessionId)
+                        is CoreEvent.MessageFinished -> {
+                            finishRun(event.sessionId)
+                            titleAttempts.remove(event.sessionId)
+                            refreshSessions()
+                        }
                         is CoreEvent.Interrupted -> finishRun(event.sessionId)
                         is CoreEvent.TurnError -> finishRun(event.sessionId)
                         is CoreEvent.ApprovalRequested -> if (!appVisible) {
@@ -296,9 +307,11 @@ object CoreManager {
             keyBytes = store.loadApiKey() ?: return false
             val key = String(keyBytes, Charsets.UTF_8)
             providerConfigure(store.toRecord(key))
+            providerReady = true
             AppState.providerCleartext = store.cleartext
             true
         } catch (_: Exception) {
+            providerReady = false
             false
         } finally {
             keyBytes?.fill(0)
@@ -311,10 +324,25 @@ object CoreManager {
             AppState.sessions.clear()
             AppState.sessions.addAll(list)
         }
+        if (providerReady) {
+            for (session in list) {
+                if (!ChatTitles.isPlaceholder(session.title) || !titleAttempts.add(session.id)) continue
+                runScope.launch {
+                    // Backfill old numeric titles one at a time, after chat work.
+                    titleMutex.withLock {
+                        while (activeRuns.isNotEmpty()) delay(250)
+                        val changed = withContext(Dispatchers.IO) {
+                            runCatching { sessionsSummarize(session.id) }.getOrDefault(false)
+                        }
+                        if (changed) refreshSessions()
+                    }
+                }
+            }
+        }
     }
 
     fun newChat(): String {
-        val session = sessionsCreate("Chat ${System.currentTimeMillis() / 1000 % 100000}")
+        val session = sessionsCreate("New chat")
         refreshSessions()
         return session.id
     }

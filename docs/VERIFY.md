@@ -834,3 +834,20 @@ Rounded fields: shared Material shapes now use 12 dp input corners; composer
 uses the 20 dp medium shape. Build-verified; text-only device inspection cannot
 verify rendered corner curvature. New UI tests not added for this layout-only
 change; existing JVM suite passes. Landscape and alternative IMEs PENDING.
+
+## 2026-10-29: generated conversation titles
+
+PASS: `cargo fmt -p palmcode-agent -p palmcode-store -p palmcode-ffi --check`,
+`cargo clippy -p palmcode-agent -p palmcode-store -p palmcode-ffi --all-targets -- -D warnings`,
+and `cargo test -p palmcode-agent -p palmcode-store -p palmcode-ffi` from core/.
+New regressions cover title normalization and placeholder recognition, a mock
+LLM summary with no tools and no transcript pollution, persistence/reopen,
+no repeat request for a generated title, failed-summary isolation, and a stale
+compare-and-set rename. No live provider requests were sent.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`.
+Android title-label tests cover hiding legacy numbers and preserving descriptive
+titles. New chats start as New chat; successful replies trigger queued optional
+summary requests, and existing numbered chats are backfilled while idle.
+PENDING-DEVICE: real-provider title generation and one-line list rendering.
+The new app was not launched against owner credentials during validation.

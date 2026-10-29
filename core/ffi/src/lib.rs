@@ -504,6 +504,11 @@ pub fn sessions_create(title: String) -> Result<SessionInfo, FfiError> {
 }
 
 #[uniffi::export]
+pub fn sessions_summarize(session_id: String) -> Result<bool, FfiError> {
+    engine()?.summarize_session(&session_id).map_err(map_err)
+}
+
+#[uniffi::export]
 pub fn sessions_list() -> Result<Vec<SessionInfo>, FfiError> {
     Ok(engine()?
         .list_sessions()

@@ -230,6 +230,18 @@ impl Store {
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, StoreError> {
         self.call(false, move |db| db.list_sessions())
     }
+    pub fn rename_session(
+        &self,
+        session: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, StoreError> {
+        let (session, expected, title) =
+            (session.to_owned(), expected.to_owned(), title.to_owned());
+        self.call(true, move |db| {
+            db.rename_session(&session, &expected, &title)
+        })
+    }
     pub fn begin_message(
         &self,
         session: &str,

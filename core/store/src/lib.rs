@@ -270,6 +270,19 @@ impl DbStore {
         })
     }
 
+    pub fn rename_session(
+        &self,
+        session: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE sessions SET title=?1 WHERE id=?2 AND title=?3",
+            params![title, session, expected],
+        )? == 1)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
@@ -824,6 +837,28 @@ mod tests {
 mod m2_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn rename_commits_only_if_the_expected_title_still_matches() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.new_session("New chat", "test").unwrap();
+        assert!(
+            store
+                .rename_session(&session.id, "New chat", "Fix shell tests")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .rename_session(&session.id, "New chat", "Stale title")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .rename_session("missing", "New chat", "Ignored")
+                .unwrap()
+        );
+        assert_eq!(store.list_sessions().unwrap()[0].title, "Fix shell tests");
+    }
 
     fn boot() -> (Store, StoredSession, i64) {
         let s = Store::open_in_memory().unwrap();

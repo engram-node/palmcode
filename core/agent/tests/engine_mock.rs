@@ -71,6 +71,126 @@ fn cfg(base: String) -> ProviderCfg {
     }
 }
 
+#[test]
+fn session_summary_is_generated_without_tools_persisted_and_requested_once() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![
+                ChatScript {
+                    body: sse_stream(&["Use a shell test script."]),
+                    ..Default::default()
+                },
+                ChatScript {
+                    body: sse_stream(&["Fix shell tests"]),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("titles.db");
+    let engine = Engine::start(&path, collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let session = engine.create_session("Chat 12345").unwrap();
+    assert!(!engine.summarize_session(&session.id).unwrap()); // No empty-chat request.
+    let mid = engine
+        .send(&session.id, "Help fix failing shell tests")
+        .unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "reply",
+    );
+    let before = engine.transcript(&session.id).unwrap();
+    assert!(engine.summarize_session(&session.id).unwrap());
+    assert!(!engine.summarize_session(&session.id).unwrap());
+    assert_eq!(engine.list_sessions().unwrap()[0].title, "Fix shell tests");
+    assert_eq!(engine.transcript(&session.id).unwrap().len(), before.len());
+    let bodies: Vec<serde_json::Value> = server
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| serde_json::from_slice(body).unwrap())
+        .filter(|body: &serde_json::Value| body.get("stream").is_some())
+        .collect();
+    assert_eq!(bodies.len(), 2);
+    let request = &bodies[1];
+    assert!(request.get("tools").is_none());
+    assert_eq!(request["max_tokens"], 256);
+    assert_eq!(request["messages"].as_array().unwrap().len(), 2);
+    engine.shutdown();
+    drop(engine);
+    let reopened = Engine::start(&path, collector).unwrap();
+    assert_eq!(
+        reopened.list_sessions().unwrap()[0].title,
+        "Fix shell tests"
+    );
+    reopened.shutdown();
+}
+
+#[test]
+fn failed_summary_preserves_chat_and_custom_titles_make_no_request() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![
+                ChatScript::default(),
+                ChatScript {
+                    status: 400,
+                    body: b"bad request".to_vec(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::start(&dir.path().join("titles.db"), collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let custom = engine.create_session("My shell notes").unwrap();
+    assert!(!engine.summarize_session(&custom.id).unwrap());
+    let session = engine.create_session("New chat").unwrap();
+    let mid = engine.send(&session.id, "Help with a script").unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "reply",
+    );
+    assert!(!engine.summarize_session(&session.id).unwrap());
+    assert_eq!(
+        engine
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|s| s.id == session.id)
+            .unwrap()
+            .title,
+        "New chat"
+    );
+    assert!(
+        engine
+            .transcript(&session.id)
+            .unwrap()
+            .iter()
+            .all(|m| m.error.is_none())
+    );
+    let chats = server
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body).unwrap())
+        .filter(|body| body.get("stream").is_some())
+        .count();
+    assert_eq!(chats, 2);
+    engine.shutdown();
+}
+
 fn sse_stream(tokens: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     for t in tokens {

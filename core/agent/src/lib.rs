@@ -20,6 +20,8 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 #[cfg(any(test, target_os = "android"))]
 mod userland;
 
+mod titles;
+
 #[cfg(all(test, not(target_os = "android")))]
 mod crash_tests;
 
@@ -832,6 +834,11 @@ impl Engine {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, EngineError> {
         Ok(self.store.list_sessions()?.iter().map(summary).collect())
+    }
+
+    /// Optional, bounded network work. Call off the UI thread after the turn.
+    pub fn summarize_session(&self, session_id: &str) -> Result<bool, EngineError> {
+        self.summarize_title(session_id)
     }
 
     pub fn transcript(&self, session_id: &str) -> Result<Vec<TranscriptItem>, EngineError> {

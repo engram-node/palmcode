@@ -23,9 +23,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.palmcode.app.AppState
 import dev.palmcode.app.CoreManager
+import dev.palmcode.app.ChatTitles
 import dev.palmcode.app.Screen
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -96,7 +98,12 @@ fun SessionListScreen() {
                         .clickable { CoreManager.openChat(s.id) },
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(s.title, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            ChatTitles.display(s.title),
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         Text(
                             "${s.status} · ${s.model} · " + SimpleDateFormat(
                                 "MM-dd HH:mm", Locale.US,
