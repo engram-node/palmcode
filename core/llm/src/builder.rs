@@ -189,6 +189,7 @@ mod tests {
                 Message::user("u"),
                 Message::assistant_tool_calls(
                     vec![ToolCallSpec {
+                        extra_content: None,
                         id: "i".into(),
                         name: "n".into(),
                         arguments: "{}".into(),

@@ -955,3 +955,32 @@ Markdown H1-H6 now use 22/20/18/16/16/14 sp semibold styles instead of the
 Material display/headline scale. Paragraphs, lists, code and app typography
 retain their existing styles. No new tests for this typography-only change.
 PENDING-DEVICE: owner visual review; app not opened and no provider request sent.
+
+## 2026-10-29: post-tool HTTP 400, missing continuation metadata
+
+FAIL on motorola edge 50 neo, Android 16, debug da5dfa5:
+`adb exec-out uiautomator dump /dev/tty`, parsed in RAM to print only a fixed
+protocol-word whitelist, confirmed HTTP 400 with missing thought_signature
+on a functionCall. The owner reported the bash clone itself had completed.
+Neither clone nor provider request was rerun. The parser and tool wire types
+had discarded extra_content, which the endpoint requires on the follow-up.
+
+PASS from core/:
+`cargo fmt -p palmcode-agent -p palmcode-llm -p palmcode-store --check`;
+`cargo clippy -p palmcode-agent -p palmcode-llm -p palmcode-store --all-targets -- -D warnings`;
+`cargo test -p palmcode-agent -p palmcode-llm -p palmcode-store -- --skip live_probe_and_chat`
+(98 passed; live probe filtered; subprocess helper independently ignored and
+invoked by its parent). After adding stored-row Debug redaction, the store
+suite was rerun with `cargo test -p palmcode-store`: 12 passed.
+Four new tests cover metadata parsing/redaction, early/late parallel deltas,
+legacy schema migration with atomic intent persistence and reopen, and the
+actual follow-up request body both immediately and after engine restart.
+The replay regression also confirms the completed tool is not re-executed.
+
+PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(15 JVM tests, zero failures), then
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+PENDING-DEVICE: owner-provider follow-up in a new chat using the existing checkout.
+Historical calls lack the previously discarded metadata; no signature is invented
+and no completed command is replayed. No provider edit, live call, data clear,
+uninstall, screenshot or device-setting change was performed.

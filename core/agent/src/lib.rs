@@ -972,12 +972,8 @@ impl Engine {
                 if !calls.is_empty() {
                     let specs: Vec<palmcode_llm::types::ToolCallSpec> = calls
                         .iter()
-                        .map(|c| palmcode_llm::types::ToolCallSpec {
-                            id: c.id.clone(),
-                            name: c.name.clone(),
-                            arguments: c.args.clone(),
-                        })
-                        .collect();
+                        .map(restored_tool_spec)
+                        .collect::<Result<_, _>>()?;
                     out.push(Message::assistant_tool_calls(specs, None));
                     for c in &calls {
                         out.push(Message::tool(
@@ -1002,12 +998,8 @@ impl Engine {
                     } else {
                         let specs: Vec<palmcode_llm::types::ToolCallSpec> = calls
                             .iter()
-                            .map(|c| palmcode_llm::types::ToolCallSpec {
-                                id: c.id.clone(),
-                                name: c.name.clone(),
-                                arguments: c.args.clone(),
-                            })
-                            .collect();
+                            .map(restored_tool_spec)
+                            .collect::<Result<_, _>>()?;
                         out.push(Message::assistant_tool_calls(
                             specs,
                             if text.is_empty() { None } else { Some(text) },
@@ -1155,6 +1147,23 @@ impl Engine {
             (false, "Packaged userland self-test requires Android".into())
         }
     }
+}
+
+fn restored_tool_spec(
+    c: &palmcode_store::StoredToolCall,
+) -> Result<palmcode_llm::types::ToolCallSpec, EngineError> {
+    let extra_content = c
+        .extra_content
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| LlmError::BadJson("Stored tool continuation metadata is invalid".into()))?;
+    Ok(palmcode_llm::types::ToolCallSpec {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        arguments: c.args.clone(),
+        extra_content,
+    })
 }
 
 fn summary(s: &StoredSession) -> SessionSummary {
@@ -1735,7 +1744,14 @@ async fn execute_calls(
     // crash mid-batch marks everything unfinished (never silently re-run).
     let records: Vec<_> = calls
         .iter()
-        .map(|c| (c.id.clone(), c.name.clone(), c.arguments.clone()))
+        .map(|c| {
+            (
+                c.id.clone(),
+                c.name.clone(),
+                c.arguments.clone(),
+                c.extra_content.as_ref().map(|m| m.0.to_string()),
+            )
+        })
         .collect();
     if engine
         .store
@@ -2456,6 +2472,7 @@ mod tests {
             "s",
             1,
             vec![palmcode_llm::types::ToolCallSpec {
+                extra_content: None,
                 id: "write".into(),
                 name: "write".into(),
                 arguments: r#"{"path":"must-not-exist","content":"data"}"#.into(),
@@ -2489,6 +2506,7 @@ mod tests {
     fn persisted_cards_preserve_all_tool_kinds_and_bound_unicode_output() {
         for name in ["read", "write", "edit", "bash"] {
             let card = transcript_tool(palmcode_store::StoredToolCall {
+                extra_content: None,
                 id: name.into(),
                 session_id: "s".into(),
                 message_id: 1,
@@ -2519,6 +2537,7 @@ mod tests {
     #[test]
     fn interrupted_card_does_not_present_stale_output_as_success() {
         let card = transcript_tool(palmcode_store::StoredToolCall {
+            extra_content: None,
             id: "c".into(),
             session_id: "s".into(),
             message_id: 1,

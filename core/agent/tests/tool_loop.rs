@@ -252,6 +252,73 @@ fn workspace_with(files: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 #[test]
+fn signed_tool_metadata_is_echoed_after_execution_and_restart() {
+    let metadata = serde_json::json!({"google":{"thought_signature":"fixture-signature"}});
+    let payload = serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+        "index":0,"id":"signed-read","function":{"name":"read","arguments":"{\"path\":\"src/main.rs\"}"},"extra_content":metadata
+    }]},"finish_reason":"stop"}]});
+    let body = format!("data: {payload}\n\ndata: [DONE]\n\n").into_bytes();
+    let Rig {
+        _dir,
+        c,
+        engine,
+        _server,
+        _rt,
+        base,
+    } = setup(vec![body, text_with_usage("Read completed", 50, 3)]);
+    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Signed exchange").unwrap();
+    let mid = engine.send(&session.id, "Read the file").unwrap();
+    wait_for(
+        &c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "signed tool followup",
+    );
+    let chats: Vec<serde_json::Value> = _server
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| serde_json::from_slice(body).unwrap())
+        .filter(|body: &serde_json::Value| body.get("stream").is_some())
+        .collect();
+    let assistant = chats[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["tool_calls"][0]["extra_content"], metadata);
+    engine.shutdown();
+    drop(engine);
+    let reopened = Engine::start(&_dir.path().join("t.db"), c.clone()).unwrap();
+    reopened.configure(cfg(base)).unwrap();
+    let mid = reopened
+        .send(&session.id, "Continue from the saved result")
+        .unwrap();
+    wait_for(
+        &c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "reopened followup",
+    );
+    let bodies = _server.bodies.lock().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(bodies.last().unwrap()).unwrap();
+    let assistant = wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["tool_calls"][0]["extra_content"], metadata);
+    assert_eq!(
+        c.count(|event| matches!(event, Event::ToolStarted { .. })),
+        1
+    );
+    reopened.shutdown();
+}
+
+#[test]
 fn stop_labeled_tool_after_normal_replies_runs_and_persists_a_card_and_answer() {
     let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_READ))
         .unwrap()

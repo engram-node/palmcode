@@ -116,13 +116,20 @@ impl Store {
         &self,
         session: &str,
         message_id: i64,
-        calls: &[(String, String, String)],
+        calls: &[(String, String, String, Option<String>)],
     ) -> Result<(), StoreError> {
         let session = session.to_owned();
         let calls = calls.to_owned();
         self.call(true, move |db| {
-            for (id, name, args) in calls {
-                db.tool_call_started(&session, message_id, &id, &name, &args)?;
+            for (id, name, args, extra_content) in calls {
+                db.tool_call_started(
+                    &session,
+                    message_id,
+                    &id,
+                    &name,
+                    &args,
+                    extra_content.as_deref(),
+                )?;
             }
             Ok(())
         })
@@ -350,7 +357,7 @@ impl Store {
         let name = name.to_owned();
         let args = args.to_owned();
         self.call(true, move |db| {
-            db.tool_call_started(&session, message_id, &call_id, &name, &args)
+            db.tool_call_started(&session, message_id, &call_id, &name, &args, None)
         })
     }
     pub fn tool_call_finished(
