@@ -807,3 +807,30 @@ request. The existing saved error was sufficient to diagnose the offending
 field; no live call was sent during this fix. No data clear, uninstall, provider
 edit, or power-setting change was performed. Lint retains the preceding
 generated-code/local-configuration failures and was not rerun for this change.
+
+## 2026-10-29: chat keyboard viewport and rounded inputs
+
+Device: motorola edge 50 neo, Android 16; debug build; commit containing this
+entry. PASS: `./gradlew.bat :android:app:testDebugUnitTest :android:app:assembleDebug --console=plain`
+(13 JVM tests, zero failures), then
+`adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`.
+
+PASS: reproduced before the fix using
+`adb shell am start -n dev.palmcode/dev.palmcode.app.MainActivity`,
+`adb shell input tap 600 550`, `adb shell input tap 450 2550`,
+`adb exec-out uiautomator dump /dev/tty` (parsed in memory; only control bounds
+printed): keyboard open, composer `[34,520][924,678]`, chat header `[0,0][0,0]`.
+
+PASS after installing: same existing conversation, tap composer center,
+`adb exec-out uiautomator dump /dev/tty` and `adb shell dumpsys window`.
+Keyboard closed composer `[34,2478][924,2636]`; keyboard open composer
+`[34,1482][924,1640]`, IME top 1674, header `[57,164][180,212]`.
+Transcript text remains visible above the composer. PASS:
+`adb shell input text Keyboard_layout_check` kept the composer at the same
+keyboard-open bounds. Synthetic text was deleted without sending. No live
+provider request, provider changes, data clear or power-setting changes.
+
+Rounded fields: shared Material shapes now use 12 dp input corners; composer
+uses the 20 dp medium shape. Build-verified; text-only device inspection cannot
+verify rendered corner curvature. New UI tests not added for this layout-only
+change; existing JVM suite passes. Landscape and alternative IMEs PENDING.

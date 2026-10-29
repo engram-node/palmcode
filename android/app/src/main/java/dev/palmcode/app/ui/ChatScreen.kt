@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.displayCutoutPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
 import dev.palmcode.app.AppState
@@ -51,6 +55,7 @@ fun ChatScreen(sessionId: String) {
         AppState.screen = Screen.Sessions
     }
     val listState = rememberLazyListState()
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
     var input by remember { mutableStateOf("") }
     val streaming = transcript.lastOrNull()?.streaming == true
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -78,7 +83,16 @@ fun ChatScreen(sessionId: String) {
         if (tail != null && tail.streaming == false) listState.scrollToItem(transcript.size - 1)
     }
 
-    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+    // Keep the latest turn visible when the IME reduces the transcript viewport.
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0 && transcript.isNotEmpty()) {
+            listState.scrollToItem(transcript.lastIndex)
+        }
+    }
+
+    // Android resizes rather than panning this edge-to-edge window. Consume each
+    // inset here so the composer stays at the bottom of the remaining viewport.
+    Column(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding().imePadding()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -157,6 +171,7 @@ fun ChatScreen(sessionId: String) {
                 onValueChange = { input = it },
                 placeholder = { Text("Message") },
                 modifier = Modifier.weight(1f),
+                shape = MaterialTheme.shapes.medium,
                 maxLines = 4,
             )
             if (streaming) {

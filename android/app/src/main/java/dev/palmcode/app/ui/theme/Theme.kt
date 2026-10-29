@@ -2,7 +2,9 @@ package dev.palmcode.app.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -15,6 +17,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -172,6 +175,17 @@ fun PalmcodeTheme(
         )
     }
     CompositionLocalProvider(LocalContentStyles provides styles) {
-        MaterialTheme(colorScheme = colors, typography = AppTypography, content = content)
+        MaterialTheme(
+            colorScheme = colors,
+            typography = AppTypography,
+            shapes = Shapes(
+                extraSmall = RoundedCornerShape(12.dp),
+                small = RoundedCornerShape(16.dp),
+                medium = RoundedCornerShape(20.dp),
+                large = RoundedCornerShape(24.dp),
+                extraLarge = RoundedCornerShape(28.dp),
+            ),
+            content = content,
+        )
     }
 }
