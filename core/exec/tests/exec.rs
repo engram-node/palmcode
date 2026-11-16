@@ -4,8 +4,6 @@
 
 use std::time::{Duration, Instant};
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use palmcode_exec::sweep_orphans;
 use palmcode_exec::{Cancel, CaptureLimits, EnvSpec, Executor, HostExecutor};
 
 fn env(dir: &std::path::Path) -> EnvSpec {
