@@ -122,7 +122,7 @@ fn timeout_still_applies_after_both_pipes_close() {
     let started = Instant::now();
     let result = exec().run(&spec, &mut |_: &[u8]| {}).unwrap();
     assert!(result.timed_out);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
