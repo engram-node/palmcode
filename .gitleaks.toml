@@ -31,6 +31,7 @@ description = "vendored upstream test-data / API-constant files (crypto test key
 paths = [
   '''core/vendor/linux-raw-sys/.*/netlink\.rs$''',
   '''core/vendor/libsqlite3-sys/(sqlite3|sqlcipher)/''',
+  '''core/vendor/sqlite-wasm-rs/sqlite3/''',
   '''core/vendor/openssl/(src/(cipher_ctx|dsa|ec|pkey|pkey_ctx|rsa|symm)\.rs|test/)''',
   '''core/vendor/ring/src/(aead/poly1305_test\.txt|rsa/keypair\.rs)''',
   '''core/vendor/(schannel/src/crypt_prov\.rs|security-framework/src/os/macos/encrypt_transform\.rs)''',
