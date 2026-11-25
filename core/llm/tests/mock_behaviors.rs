@@ -14,6 +14,207 @@ use palmcode_llm::types::Message;
 
 const OK_SSE: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
 
+#[tokio::test]
+async fn unterminated_final_sse_event_delivers_the_response() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Here is the answer\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":14}}".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Here is the answer");
+}
+
+#[tokio::test]
+async fn done_ends_the_response_without_waiting_for_socket_close() {
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body: OK_SSE.to_vec(),
+            hang_after_body: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 100));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // The server deliberately keeps the response open. Waiting for EOF would
+    // hit the idle timeout even though the provider already sent [DONE].
+    c.chat(&req(), tx).await.unwrap();
+}
+
+#[tokio::test]
+async fn nameless_tool_stub_is_an_error_without_retry() {
+    for name in ["", "   "] {
+        let payload = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":name,"arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"completion_tokens":14}});
+        let body = format!("data: {payload}\n\ndata: [DONE]\n\n").into_bytes();
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = client(&server, timeouts(2000, 2000));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            matches!(c.chat(&req(), tx).await, Err(LlmError::Decode(message)) if message.contains("incomplete tool call"))
+        );
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn tool_stub_followed_by_final_unterminated_name_is_a_valid_call() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\"}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut acc = palmcode_llm::accumulator::ToolAccumulator::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Tools(deltas) = event {
+            for delta in deltas {
+                acc.push(&delta);
+            }
+        }
+    }
+    let calls = acc.finish();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "read");
+}
+
+#[tokio::test]
+async fn full_message_and_text_parts_reach_client_text_events() {
+    for choice in [
+        serde_json::json!({"message":{"content":"Hello there"},"finish_reason":"stop"}),
+        serde_json::json!({"delta":{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"there"}]},"finish_reason":"stop"}),
+    ] {
+        let body = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[choice]})
+        )
+        .into_bytes();
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = client(&server, timeouts(2000, 2000));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        c.chat(&req(), tx).await.unwrap();
+        let mut text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "Hello there");
+    }
+}
+
+#[tokio::test]
+async fn final_full_message_does_not_duplicate_streamed_text() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"message\":{\"content\":\"Hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello");
+}
+
+#[tokio::test]
+async fn final_full_message_completes_a_partial_delta() {
+    let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"message\":{\"content\":\"Hello there\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&req(), tx).await.unwrap();
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let palmcode_llm::client::ClientEvent::Text(delta) = event {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello there");
+}
+
+#[tokio::test]
+async fn usage_only_response_is_an_explicit_error_without_retry_or_first_token() {
+    let body = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":34}}\n\ndata: [DONE]\n\n".to_vec();
+    let server = serve(MockConfig {
+        scripts: vec![ChatScript {
+            body,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = client(&server, timeouts(2000, 2000));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(
+        matches!(c.chat(&req(), tx).await, Err(LlmError::Decode(message)) if message.contains("no response text"))
+    );
+    assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(
+            event,
+            palmcode_llm::client::ClientEvent::FirstToken { .. }
+        ));
+    }
+}
+
 fn timeouts(first_ms: u64, idle_ms: u64) -> Timeouts {
     Timeouts {
         first_token: Duration::from_millis(first_ms),
@@ -53,6 +254,59 @@ async fn happy_path_via_mock() {
     assert_eq!(out.usage.unwrap().prompt_tokens, 3);
     assert!(out.ttft.is_some());
     assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standard_tool_chat_wire_omits_disabled_continuous_usage_extension() {
+    let server = serve(MockConfig::default()).await.unwrap();
+    let c = client(&server, timeouts(1000, 1000));
+    let mut request = req();
+    request.tools = Some(vec![serde_json::json!({
+        "name": "read",
+        "description": "Read a file",
+        "input_schema": {"type": "object", "properties": {}},
+    })]);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    c.chat(&request, tx).await.unwrap();
+    let bodies = server.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    let wire: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+    assert_eq!(
+        wire["stream_options"],
+        serde_json::json!({"include_usage": true})
+    );
+    assert_eq!(wire["tool_choice"], "auto");
+    assert!(
+        wire["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn probe_does_not_enable_unrequested_extension_from_usage_chunks() {
+    let usage_stream = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+    for enabled in [false, true] {
+        let server = serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: usage_stream.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let c = Client::new(ClientConfig {
+            base_url: server.base_url(),
+            api_key: SecretKey::new("synthetic-fixture".into()),
+            timeouts: timeouts(1000, 1000),
+            continuous_usage: enabled,
+        })
+        .unwrap();
+        let report = palmcode_llm::probe::probe(&c, "fixture").await;
+        assert!(report.chat.is_none());
+        assert_eq!(report.continuous_usage, enabled);
+    }
 }
 
 #[tokio::test]

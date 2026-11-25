@@ -1,7 +1,7 @@
 use super::{Null, Value, ValueRef};
-#[cfg(feature = "array")]
-use crate::vtab::array::Array;
-use crate::{Error, Result};
+#[cfg(feature = "fallible_uint")]
+use crate::Error;
+use crate::Result;
 use std::borrow::Cow;
 
 /// `ToSqlOutput` represents the possible output types for implementers of the
@@ -18,18 +18,55 @@ pub enum ToSqlOutput<'a> {
     /// A BLOB of the given length that is filled with
     /// zeroes.
     #[cfg(feature = "blob")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "blob")))]
-    ZeroBlob(i32),
+    ZeroBlob(u64),
 
     /// n-th arg of an SQL scalar function
     #[cfg(feature = "functions")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "functions")))]
     Arg(usize),
 
-    /// `feature = "array"`
-    #[cfg(feature = "array")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "array")))]
-    Array(Array),
+    /// Pointer passing interface
+    #[cfg(feature = "pointer")]
+    Pointer(
+        (
+            *const std::ffi::c_void,
+            &'static std::ffi::CStr,
+            crate::ffi::sqlite3_destructor_type,
+        ),
+    ),
+}
+
+#[cfg(feature = "pointer")]
+impl<'a> ToSqlOutput<'a> {
+    /// Pass an `Rc` as a raw pointer to SQLite
+    ///
+    /// # Warning
+    /// Leak memory if an error happens before the returned pointer is bound to an SQLite statement.
+    pub fn from_rc<T>(rc: std::rc::Rc<T>, ptr_type: &'static std::ffi::CStr) -> ToSqlOutput<'a> {
+        unsafe extern "C" fn free_rc<T>(p: *mut std::ffi::c_void) {
+            unsafe {
+                std::rc::Rc::decrement_strong_count(p.cast::<T>());
+            }
+        }
+        ToSqlOutput::Pointer((
+            std::rc::Rc::into_raw(rc).cast::<std::ffi::c_void>(),
+            ptr_type,
+            Some(free_rc::<T>),
+        ))
+    }
+
+    /// Pass a `Box` as a raw pointer to SQLite
+    ///
+    /// # Warning
+    /// Leak memory if an error happens before the returned pointer is bound to an SQLite statement.
+    pub fn new_boxed<T>(v: T, ptr_type: &'static std::ffi::CStr) -> ToSqlOutput<'a> {
+        use crate::util::free_boxed_value;
+
+        ToSqlOutput::Pointer((
+            Box::into_raw(Box::new(v)).cast::<std::ffi::c_void>(),
+            ptr_type,
+            Some(free_boxed_value::<T>),
+        ))
+    }
 }
 
 // Generically allow any type that can be converted into a ValueRef
@@ -91,15 +128,12 @@ from_value!(non_zero std::num::NonZeroU32);
 // `i128` needs in `Into<Value>`, but it's probably fine for the moment, and not
 // worth adding another case to Value.
 #[cfg(feature = "i128_blob")]
-#[cfg_attr(docsrs, doc(cfg(feature = "i128_blob")))]
 from_value!(i128);
 
 #[cfg(feature = "i128_blob")]
-#[cfg_attr(docsrs, doc(cfg(feature = "i128_blob")))]
 from_value!(non_zero std::num::NonZeroI128);
 
 #[cfg(feature = "uuid")]
-#[cfg_attr(docsrs, doc(cfg(feature = "uuid")))]
 from_value!(uuid::Uuid);
 
 impl ToSql for ToSqlOutput<'_> {
@@ -113,14 +147,14 @@ impl ToSql for ToSqlOutput<'_> {
             ToSqlOutput::ZeroBlob(i) => ToSqlOutput::ZeroBlob(i),
             #[cfg(feature = "functions")]
             ToSqlOutput::Arg(i) => ToSqlOutput::Arg(i),
-            #[cfg(feature = "array")]
-            ToSqlOutput::Array(ref a) => ToSqlOutput::Array(a.clone()),
+            #[cfg(feature = "pointer")]
+            ToSqlOutput::Pointer(p) => ToSqlOutput::Pointer(p),
         })
     }
 }
 
 /// A trait for types that can be converted into SQLite values. Returns
-/// [`Error::ToSqlConversionFailure`] if the conversion fails.
+/// [`crate::Error::ToSqlConversionFailure`] if the conversion fails.
 pub trait ToSql {
     /// Converts Rust value to SQLite value
     fn to_sql(&self) -> Result<ToSqlOutput<'_>>;
@@ -200,17 +234,15 @@ to_sql_self!(std::num::NonZeroU16);
 to_sql_self!(std::num::NonZeroU32);
 
 #[cfg(feature = "i128_blob")]
-#[cfg_attr(docsrs, doc(cfg(feature = "i128_blob")))]
 to_sql_self!(i128);
 
 #[cfg(feature = "i128_blob")]
-#[cfg_attr(docsrs, doc(cfg(feature = "i128_blob")))]
 to_sql_self!(std::num::NonZeroI128);
 
 #[cfg(feature = "uuid")]
-#[cfg_attr(docsrs, doc(cfg(feature = "uuid")))]
 to_sql_self!(uuid::Uuid);
 
+#[cfg(feature = "fallible_uint")]
 macro_rules! to_sql_self_fallible(
     ($t:ty) => (
         impl ToSql for $t {
@@ -241,9 +273,13 @@ macro_rules! to_sql_self_fallible(
 );
 
 // Special implementations for usize and u64 because these conversions can fail.
+#[cfg(feature = "fallible_uint")]
 to_sql_self_fallible!(u64);
+#[cfg(feature = "fallible_uint")]
 to_sql_self_fallible!(usize);
+#[cfg(feature = "fallible_uint")]
 to_sql_self_fallible!(non_zero std::num::NonZeroU64);
+#[cfg(feature = "fallible_uint")]
 to_sql_self_fallible!(non_zero std::num::NonZeroUsize);
 
 impl<T: ?Sized> ToSql for &'_ T
@@ -310,8 +346,11 @@ impl<T: ToSql> ToSql for Option<T> {
 
 #[cfg(test)]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use super::{ToSql, ToSqlOutput};
-    use crate::{types::Value, types::ValueRef, Result};
+    use crate::{Result, types::Value, types::ValueRef};
 
     fn is_to_sql<T: ToSql>() {}
 
@@ -338,7 +377,9 @@ mod test {
         is_to_sql::<u8>();
         is_to_sql::<u16>();
         is_to_sql::<u32>();
+        #[cfg(feature = "fallible_uint")]
         is_to_sql::<u64>();
+        #[cfg(feature = "fallible_uint")]
         is_to_sql::<usize>();
     }
 
@@ -352,7 +393,9 @@ mod test {
         is_to_sql::<std::num::NonZeroU8>();
         is_to_sql::<std::num::NonZeroU16>();
         is_to_sql::<std::num::NonZeroU32>();
+        #[cfg(feature = "fallible_uint")]
         is_to_sql::<std::num::NonZeroU64>();
+        #[cfg(feature = "fallible_uint")]
         is_to_sql::<std::num::NonZeroUsize>();
     }
 
@@ -445,7 +488,8 @@ mod test {
 
     #[cfg(feature = "i128_blob")]
     #[test]
-    fn test_i128() -> crate::Result<()> {
+    #[cfg_attr(miri, ignore)]
+    fn test_i128() -> Result<()> {
         use crate::Connection;
         let db = Connection::open_in_memory()?;
         db.execute_batch("CREATE TABLE foo (i128 BLOB, desc TEXT)")?;
@@ -484,7 +528,8 @@ mod test {
 
     #[cfg(feature = "i128_blob")]
     #[test]
-    fn test_non_zero_i128() -> crate::Result<()> {
+    #[cfg_attr(miri, ignore)]
+    fn test_non_zero_i128() -> Result<()> {
         use std::num::NonZeroI128;
         macro_rules! nz {
             ($x:expr) => {
@@ -532,8 +577,9 @@ mod test {
 
     #[cfg(feature = "uuid")]
     #[test]
-    fn test_uuid() -> crate::Result<()> {
-        use crate::{params, Connection};
+    #[cfg_attr(miri, ignore)]
+    fn test_uuid() -> Result<()> {
+        use crate::{Connection, params};
         use uuid::Uuid;
 
         let db = Connection::open_in_memory()?;
@@ -557,5 +603,25 @@ mod test {
         assert_eq!(found_id, id);
         assert_eq!(found_label, "target");
         Ok(())
+    }
+
+    #[cfg(feature = "pointer")]
+    #[test]
+    fn from_rc() {
+        let rc = std::rc::Rc::new("rc".to_owned());
+        if let ToSqlOutput::Pointer((ptr, _, Some(destructor))) = ToSqlOutput::from_rc(rc, c"rc") {
+            unsafe { destructor(ptr.cast_mut()) }
+        }
+    }
+
+    #[cfg(feature = "pointer")]
+    #[test]
+    fn new_boxed() {
+        let data = "box".to_owned();
+        if let ToSqlOutput::Pointer((ptr, _, Some(destructor))) =
+            ToSqlOutput::new_boxed(data, c"box")
+        {
+            unsafe { destructor(ptr.cast_mut()) }
+        }
     }
 }

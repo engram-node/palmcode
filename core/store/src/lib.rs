@@ -8,8 +8,13 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 
+mod writer;
+pub use writer::Store;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("store writer: {0}")]
+    Writer(String),
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
@@ -55,7 +60,7 @@ pub struct Preimage {
     pub spill_path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StoredToolCall {
     pub id: String,
     pub session_id: String,
@@ -68,6 +73,18 @@ pub struct StoredToolCall {
     pub duration_ms: i64,
     pub output: Option<String>,
     pub spill_path: Option<String>,
+    pub extra_content: Option<String>,
+}
+
+impl std::fmt::Debug for StoredToolCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredToolCall")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("status", &self.status)
+            .field("has_extra_content", &self.extra_content.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +97,7 @@ pub struct StoredWorkspace {
     pub trusted: bool,
 }
 
-pub struct Store {
+struct DbStore {
     conn: Mutex<Connection>,
 }
 
@@ -132,7 +149,8 @@ CREATE TABLE IF NOT EXISTS tool_calls(
     finished_at INTEGER,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     output TEXT,
-    spill_path TEXT
+    spill_path TEXT,
+    extra_content TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_message ON tool_calls(message_id);
 CREATE TABLE IF NOT EXISTS file_preimages(
@@ -179,6 +197,12 @@ fn now_ms() -> i64 {
 /// (no user_version framework yet —_schema drift so far is exactly one
 /// column). New tables ride the `IF NOT EXISTS` batch above instead.
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    let has_tool_metadata = conn
+        .prepare("SELECT 1 FROM pragma_table_info('tool_calls') WHERE name='extra_content'")?
+        .exists([])?;
+    if !has_tool_metadata {
+        conn.execute("ALTER TABLE tool_calls ADD COLUMN extra_content TEXT", [])?;
+    }
     let has_trusted = conn
         .prepare("SELECT 1 FROM pragma_table_info('workspaces') WHERE name='trusted'")?
         .exists([])?;
@@ -191,13 +215,14 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-impl Store {
+impl DbStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "busy_timeout", 5000u32)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
@@ -209,6 +234,7 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self {
@@ -263,6 +289,19 @@ impl Store {
         })
     }
 
+    pub fn rename_session(
+        &self,
+        session: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE sessions SET title=?1 WHERE id=?2 AND title=?3",
+            params![title, session, expected],
+        )? == 1)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
@@ -292,7 +331,7 @@ impl Store {
         streaming: bool,
     ) -> Result<i64, StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "INSERT INTO messages(session_id, role, created_at, streaming) VALUES (?1,?2,?3,?4)",
             params![session, role, now_ms(), streaming as i32],
@@ -324,7 +363,7 @@ impl Store {
         content: &str,
     ) -> Result<i64, StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT id FROM parts WHERE message_id=?1 AND kind=?2 ORDER BY id DESC LIMIT 1",
@@ -376,7 +415,7 @@ impl Store {
         interrupted: bool,
     ) -> Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "UPDATE messages SET streaming=0, interrupted=?1, tokens=?2 WHERE id=?3",
             params![interrupted as i32, tokens, message_id],
@@ -587,12 +626,13 @@ impl Store {
         call_id: &str,
         name: &str,
         args: &str,
+        extra_content: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO tool_calls(id, session_id, message_id, name, args, status, started_at)
-             VALUES (?1,?2,?3,?4,?5,'pending',?6)",
-            params![call_id, session, message_id, name, args, now_ms()],
+            "INSERT INTO tool_calls(id, session_id, message_id, name, args, status, started_at, extra_content)
+             VALUES (?1,?2,?3,?4,?5,'pending',?6,?7)",
+            params![call_id, session, message_id, name, args, now_ms(), extra_content],
         )?;
         Ok(())
     }
@@ -625,7 +665,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
             "SELECT id, session_id, message_id, name, args, status, started_at, finished_at,
-                    duration_ms, output, spill_path
+                    duration_ms, output, spill_path, extra_content
              FROM tool_calls WHERE message_id=?1 ORDER BY started_at",
         )?;
         let rows = st
@@ -642,6 +682,7 @@ impl Store {
                     duration_ms: r.get(8)?,
                     output: r.get(9)?,
                     spill_path: r.get(10)?,
+                    extra_content: r.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -655,7 +696,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
             "SELECT id, session_id, message_id, name, args, status, started_at, finished_at,
-                    duration_ms, output, spill_path
+                    duration_ms, output, spill_path, extra_content
              FROM tool_calls WHERE status='pending' ORDER BY started_at",
         )?;
         let rows = st
@@ -672,6 +713,7 @@ impl Store {
                     duration_ms: r.get(8)?,
                     output: r.get(9)?,
                     spill_path: r.get(10)?,
+                    extra_content: r.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -817,6 +859,71 @@ mod tests {
 mod m2_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn legacy_tool_metadata_migration_and_atomic_intent_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&SCHEMA.replace(",\n    extra_content TEXT", ""))
+            .unwrap();
+        drop(conn);
+        let store = Store::open(&path).unwrap();
+        let session = store.new_session("Metadata test", "test").unwrap();
+        let mid = store.begin_message(&session.id, "assistant", true).unwrap();
+        let metadata = r#"{"google":{"thought_signature":"fixture-signature"}}"#;
+        store
+            .tool_calls_started(
+                &session.id,
+                mid,
+                &[(
+                    "signed-call".into(),
+                    "read".into(),
+                    "{}".into(),
+                    Some(metadata.into()),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            store.pending_tool_calls().unwrap()[0]
+                .extra_content
+                .as_deref(),
+            Some(metadata)
+        );
+        assert!(
+            !format!("{:?}", store.pending_tool_calls().unwrap()).contains("fixture-signature")
+        );
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.tool_calls_for(mid).unwrap()[0]
+                .extra_content
+                .as_deref(),
+            Some(metadata)
+        );
+    }
+
+    #[test]
+    fn rename_commits_only_if_the_expected_title_still_matches() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.new_session("New chat", "test").unwrap();
+        assert!(
+            store
+                .rename_session(&session.id, "New chat", "Fix shell tests")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .rename_session(&session.id, "New chat", "Stale title")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .rename_session("missing", "New chat", "Ignored")
+                .unwrap()
+        );
+        assert_eq!(store.list_sessions().unwrap()[0].title, "Fix shell tests");
+    }
 
     fn boot() -> (Store, StoredSession, i64) {
         let s = Store::open_in_memory().unwrap();

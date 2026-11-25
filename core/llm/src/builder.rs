@@ -43,9 +43,13 @@ pub fn build_body(req: &ChatRequest) -> Result<serde_json::Value, LlmError> {
         "stream": true,
         "stream_options": {
             "include_usage": true,
-            "continuous_usage_stats": req.continuous_usage,
         },
     });
+    // This is a server extension, not a standard stream option. Strict
+    // compatible endpoints reject even `false` as an unknown field.
+    if req.continuous_usage {
+        body["stream_options"]["continuous_usage_stats"] = serde_json::Value::Bool(true);
+    }
     let obj = body.as_object_mut().expect("json! object");
 
     if let Some(tools) = &req.tools
@@ -104,7 +108,11 @@ pub fn build_body(req: &ChatRequest) -> Result<serde_json::Value, LlmError> {
 }
 
 pub fn body_bytes(req: &ChatRequest) -> Result<Vec<u8>, LlmError> {
-    let body = build_body(req)?;
+    let body = {
+        let _phase = palmcode_telemetry::Phase::start("request_build");
+        build_body(req)?
+    };
+    let _phase = palmcode_telemetry::Phase::start("serialize");
     serde_json::to_vec(&body).map_err(|e| LlmError::BadJson(e.to_string()))
 }
 
@@ -138,7 +146,10 @@ mod tests {
         }
         assert!(s.contains(r#""stream":true"#));
         assert!(s.contains(r#""include_usage":true"#));
-        assert!(s.contains(r#""continuous_usage_stats":false"#));
+        assert!(
+            !s.contains("continuous_usage_stats"),
+            "disabled server extension must be absent, not false"
+        );
     }
 
     #[test]
@@ -178,6 +189,7 @@ mod tests {
                 Message::user("u"),
                 Message::assistant_tool_calls(
                     vec![ToolCallSpec {
+                        extra_content: None,
                         id: "i".into(),
                         name: "n".into(),
                         arguments: "{}".into(),
@@ -205,6 +217,33 @@ mod tests {
         // sampling overrides land top-level; thinking toggle nested
         assert!(s.contains(r#""temperature":0.7"#));
         assert!(s.contains(r#""enable_thinking":false"#));
+    }
+
+    #[test]
+    fn continuous_usage_extension_is_sent_only_when_enabled() {
+        let mut req = ChatRequest {
+            model: "fixture".into(),
+            messages: vec![Message::user("hello")],
+            max_tokens: 100,
+            continuous_usage: false,
+            sampling: None,
+            extra_body: None,
+            tools: None,
+        };
+        let standard = build_body(&req).unwrap();
+        assert_eq!(
+            standard["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+        req.continuous_usage = true;
+        let extended = build_body(&req).unwrap();
+        assert_eq!(
+            extended["stream_options"],
+            serde_json::json!({
+                "include_usage": true,
+                "continuous_usage_stats": true,
+            })
+        );
     }
 
     #[test]

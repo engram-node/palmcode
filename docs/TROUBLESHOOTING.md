@@ -54,8 +54,10 @@ Rooted devices:
 adb shell su 0 setprop persist.sys.fflag.override.settings_enable_monitor_phantom_procs false
 ```
 
-palmcode additionally caps concurrent child processes (default 4) and reaps
-aggressively.
+palmcode queues bash calls behind a process-wide cap of four active bash
+executions across all sessions. Queued calls can be cancelled. Shells can
+still create descendants, so this does not bound the total number of child
+processes or prevent Android from reclaiming them.
 
 ## "exec failed: EACCES (Permission denied)" from the bash tool (M3+)
 

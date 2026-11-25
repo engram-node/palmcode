@@ -109,7 +109,13 @@ impl Layer {
 /// Secret-like basenames: reading them ships secrets to the provider.
 fn secret_globset() -> GlobSet {
     let mut b = GlobSetBuilder::new();
-    for g in ["**/.env", "**/.env.*", "**/*.pem", "**/id_rsa*", "**/*.key"] {
+    for g in [
+        "**/.env*",
+        "**/*.pem",
+        "**/id_rsa*",
+        "**/*.key",
+        "**/credentials*",
+    ] {
         b.add(Glob::new(g).unwrap());
     }
     b.build().unwrap()
@@ -154,6 +160,8 @@ pub struct Engine {
     /// a command must not broaden the match -- deliverable F).
     bash_project: std::collections::HashSet<String>,
     bash_session: Mutex<std::collections::HashSet<String>>,
+    trusted: bool,
+    unattended_bash: Mutex<bool>,
 }
 
 impl Engine {
@@ -217,6 +225,8 @@ impl Engine {
             accept_edits_session: Mutex::new(false),
             bash_project: bash_db.iter().map(|(_, p)| p.clone()).collect(),
             bash_session: Mutex::new(std::collections::HashSet::new()),
+            trusted,
+            unattended_bash: Mutex::new(false),
         })
     }
 
@@ -247,12 +257,32 @@ impl Engine {
     /// Bash commands (deliverable F): exact-match allow cache first, then the
     /// classifier. Approved commands are matched as literal strings.
     pub fn decide_bash(&self, command: &str, ctx: &bash::ClassCtx) -> bash::Outcome {
-        if self.bash_session.lock().unwrap().contains(command)
+        let normal = bash::classify(command, ctx);
+        if matches!(normal, bash::Outcome::Deny(_)) {
+            return normal;
+        }
+        let revalidated = bash::revalidate_grant(command, ctx);
+        if revalidated != bash::Outcome::Allow {
+            return revalidated;
+        }
+        if (*self.unattended_bash.lock().unwrap()
+            && bash::unattended(command, ctx) == bash::Outcome::Allow)
+            || self.bash_session.lock().unwrap().contains(command)
             || self.bash_project.contains(command)
         {
             return bash::Outcome::Allow;
         }
-        bash::classify(command, ctx)
+        normal
+    }
+
+    pub fn set_unattended_bash(&self, on: bool) -> bool {
+        let enabled = on && self.trusted;
+        *self.unattended_bash.lock().unwrap() = enabled;
+        enabled
+    }
+
+    pub fn unattended_bash_on(&self) -> bool {
+        *self.unattended_bash.lock().unwrap()
     }
 
     /// Remember an approved bash command for this session (exact string).
@@ -316,6 +346,81 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unattended_bash_is_trusted_opt_in_and_not_persisted() {
+        let (dir, e) = setup(None, true);
+        let ctx = bash::ClassCtx::new(dir.path());
+        assert!(matches!(
+            e.decide_bash("touch file", &ctx),
+            bash::Outcome::Ask(_)
+        ));
+        assert!(e.set_unattended_bash(true));
+        for command in [
+            "touch file",
+            "mkdir newdir",
+            "printf hi > file",
+            "rm -f file",
+            "chmod 600 file",
+        ] {
+            assert_eq!(
+                e.decide_bash(command, &ctx),
+                bash::Outcome::Allow,
+                "{command}"
+            );
+        }
+        assert!(!e.set_unattended_bash(false));
+        assert!(matches!(
+            e.decide_bash("touch file", &ctx),
+            bash::Outcome::Ask(_)
+        ));
+        let fresh = Engine::load(dir.path(), None, true, &[]).unwrap();
+        assert!(!fresh.unattended_bash_on());
+        let (_, untrusted) = setup(None, false);
+        assert!(!untrusted.set_unattended_bash(true));
+    }
+
+    #[test]
+    fn unattended_hard_asks_override_session_and_project_grants() {
+        let (dir, e) = setup(None, true);
+        let ctx = bash::ClassCtx::new(dir.path());
+        e.set_unattended_bash(true);
+        for command in [
+            "curl target",
+            "timeout 1 curl target",
+            "xargs git fetch",
+            "wget target",
+            "git fetch",
+            "git pull",
+            "git push",
+            "git clone source destination",
+            "cat .env",
+            "touch .git/config",
+            "cat .palmcode/config.json",
+            "rm -rf .",
+            "rm -f .git/config",
+            "chmod 600 /outside",
+            "chown 0 /outside",
+            "echo '",
+            "touch $(pwd)",
+            "rm -f *",
+            "sh script",
+        ] {
+            e.allow_bash_for_session(command);
+            assert_ne!(
+                e.decide_bash(command, &ctx),
+                bash::Outcome::Allow,
+                "{command}"
+            );
+            let persisted =
+                Engine::load(dir.path(), None, true, &[("bash".into(), command.into())]).unwrap();
+            assert_ne!(
+                persisted.decide_bash(command, &ctx),
+                bash::Outcome::Allow,
+                "{command}"
+            );
+        }
+    }
 
     fn setup(cfg: Option<&str>, trusted: bool) -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();

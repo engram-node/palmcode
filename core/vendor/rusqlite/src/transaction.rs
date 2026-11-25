@@ -1,3 +1,4 @@
+use crate::pragma::Sql;
 use crate::{Connection, Result};
 use std::ops::Deref;
 
@@ -238,7 +239,7 @@ impl Deref for Transaction<'_> {
     }
 }
 
-#[allow(unused_must_use)]
+#[expect(unused_must_use)]
 impl Drop for Transaction<'_> {
     #[inline]
     fn drop(&mut self) {
@@ -250,13 +251,13 @@ impl Savepoint<'_> {
     #[inline]
     fn with_name_<T: Into<String>>(conn: &Connection, name: T) -> Result<Savepoint<'_>> {
         let name = name.into();
-        conn.execute_batch(&format!("SAVEPOINT {name}"))
-            .map(|()| Savepoint {
-                conn,
-                name,
-                drop_behavior: DropBehavior::Rollback,
-                committed: false,
-            })
+        let sql = cmd("SAVEPOINT", false, name.as_str())?;
+        conn.execute_batch(sql.as_str()).map(|()| Savepoint {
+            conn,
+            name,
+            drop_behavior: DropBehavior::Rollback,
+            committed: false,
+        })
     }
 
     #[inline]
@@ -311,7 +312,8 @@ impl Savepoint<'_> {
 
     #[inline]
     fn commit_(&mut self) -> Result<()> {
-        self.conn.execute_batch(&format!("RELEASE {}", self.name))?;
+        let sql = cmd("RELEASE", false, self.name.as_str())?;
+        self.conn.execute_batch(sql.as_str())?;
         self.committed = true;
         Ok(())
     }
@@ -324,8 +326,8 @@ impl Savepoint<'_> {
     /// rolled back, and can be rolled back again or committed.
     #[inline]
     pub fn rollback(&mut self) -> Result<()> {
-        self.conn
-            .execute_batch(&format!("ROLLBACK TO {}", self.name))
+        let sql = cmd("ROLLBACK", true, self.name.as_str())?;
+        self.conn.execute_batch(sql.as_str())
     }
 
     /// Consumes the savepoint, committing or rolling back according to the
@@ -354,6 +356,18 @@ impl Savepoint<'_> {
     }
 }
 
+fn cmd(cmd: &'static str, to: bool, name: &str) -> Result<Sql> {
+    let mut sql = Sql::new();
+    sql.push_keyword(cmd)?;
+    sql.push_space();
+    if to {
+        sql.push_keyword("TO")?;
+        sql.push_space();
+    }
+    sql.push_identifier(name);
+    Ok(sql)
+}
+
 impl Deref for Savepoint<'_> {
     type Target = Connection;
 
@@ -363,7 +377,7 @@ impl Deref for Savepoint<'_> {
     }
 }
 
-#[allow(unused_must_use)]
+#[expect(unused_must_use)]
 impl Drop for Savepoint<'_> {
     #[inline]
     fn drop(&mut self) {
@@ -374,14 +388,12 @@ impl Drop for Savepoint<'_> {
 /// Transaction state of a database
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[cfg(feature = "modern_sqlite")] // 3.37.0
-#[cfg_attr(docsrs, doc(cfg(feature = "modern_sqlite")))]
 pub enum TransactionState {
-    /// Equivalent to SQLITE_TXN_NONE
+    /// Equivalent to `SQLITE_TXN_NONE`
     None,
-    /// Equivalent to SQLITE_TXN_READ
+    /// Equivalent to `SQLITE_TXN_READ`
     Read,
-    /// Equivalent to SQLITE_TXN_WRITE
+    /// Equivalent to `SQLITE_TXN_WRITE`
     Write,
 }
 
@@ -510,11 +522,9 @@ impl Connection {
     }
 
     /// Determine the transaction state of a database
-    #[cfg(feature = "modern_sqlite")] // 3.37.0
-    #[cfg_attr(docsrs, doc(cfg(feature = "modern_sqlite")))]
-    pub fn transaction_state(
+    pub fn transaction_state<N: crate::Name>(
         &self,
-        db_name: Option<crate::DatabaseName<'_>>,
+        db_name: Option<N>,
     ) -> Result<TransactionState> {
         self.db.borrow().txn_state(db_name)
     }
@@ -548,8 +558,12 @@ impl Connection {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
+    use std::assert_matches;
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use super::DropBehavior;
     use crate::{Connection, Error, Result};
 
@@ -570,23 +584,25 @@ mod test {
         {
             let mut tx = db.transaction()?;
             tx.execute_batch("INSERT INTO foo VALUES(2)")?;
-            tx.set_drop_behavior(DropBehavior::Commit)
+            tx.set_drop_behavior(DropBehavior::Commit);
         }
         {
             let tx = db.transaction()?;
-            assert_eq!(2i32, tx.one_column::<i32>("SELECT SUM(x) FROM foo")?);
+            assert_eq!(2, tx.one_column::<i32, _>("SELECT SUM(x) FROM foo", [])?);
         }
         Ok(())
     }
     fn assert_nested_tx_error(e: Error) {
-        if let Error::SqliteFailure(e, Some(m)) = &e {
-            assert_eq!(e.extended_code, crate::ffi::SQLITE_ERROR);
-            // FIXME: Not ideal...
-            assert_eq!(e.code, crate::ErrorCode::Unknown);
-            assert!(m.contains("transaction"));
-        } else {
-            panic!("Unexpected error type: {e:?}");
-        }
+        assert_matches!(
+            e,
+            Error::SqliteFailure(
+                crate::ffi::Error {
+                    code: crate::ErrorCode::Unknown,
+                    extended_code: crate::ffi::SQLITE_ERROR,
+                },
+                Some(msg),
+            ) if msg.contains("transaction")
+        );
     }
 
     #[test]
@@ -610,7 +626,7 @@ mod test {
             tx.commit()?;
         }
 
-        assert_eq!(2i32, db.one_column::<i32>("SELECT SUM(x) FROM foo")?);
+        assert_eq!(2, db.one_column::<i32, _>("SELECT SUM(x) FROM foo", [])?);
         Ok(())
     }
 
@@ -635,7 +651,7 @@ mod test {
         }
         {
             let tx = db.transaction()?;
-            assert_eq!(6i32, tx.one_column::<i32>("SELECT SUM(x) FROM foo")?);
+            assert_eq!(6, tx.one_column::<i32, _>("SELECT SUM(x) FROM foo", [])?);
         }
         Ok(())
     }
@@ -778,51 +794,46 @@ mod test {
     }
 
     fn assert_current_sum(x: i32, conn: &Connection) -> Result<()> {
-        let i = conn.one_column::<i32>("SELECT SUM(x) FROM foo")?;
-        assert_eq!(x, i);
+        assert_eq!(x, conn.one_column::<i32, _>("SELECT SUM(x) FROM foo", [])?);
         Ok(())
     }
 
     #[test]
-    #[cfg(feature = "modern_sqlite")]
     fn txn_state() -> Result<()> {
         use super::TransactionState;
-        use crate::DatabaseName;
+        use crate::{DEFAULT_NAME, MAIN_DB};
         let db = Connection::open_in_memory()?;
-        assert_eq!(
-            TransactionState::None,
-            db.transaction_state(Some(DatabaseName::Main))?
-        );
-        assert_eq!(TransactionState::None, db.transaction_state(None)?);
+        assert_eq!(TransactionState::None, db.transaction_state(Some(MAIN_DB))?);
+        assert_eq!(TransactionState::None, db.transaction_state(DEFAULT_NAME)?);
         db.execute_batch("BEGIN")?;
-        assert_eq!(TransactionState::None, db.transaction_state(None)?);
-        let _: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        assert_eq!(TransactionState::Read, db.transaction_state(None)?);
+        assert_eq!(TransactionState::None, db.transaction_state(DEFAULT_NAME)?);
+        let _: i32 = db.pragma_query_one(None, "user_version")?;
+        assert_eq!(TransactionState::Read, db.transaction_state(DEFAULT_NAME)?);
         db.pragma_update(None, "user_version", 1)?;
-        assert_eq!(TransactionState::Write, db.transaction_state(None)?);
+        assert_eq!(TransactionState::Write, db.transaction_state(DEFAULT_NAME)?);
         db.execute_batch("ROLLBACK")?;
         Ok(())
     }
 
     #[test]
-    #[cfg(feature = "modern_sqlite")]
     fn auto_commit() -> Result<()> {
         use super::TransactionState;
+        use crate::DEFAULT_NAME;
         let db = Connection::open_in_memory()?;
         db.execute_batch("CREATE TABLE t(i UNIQUE);")?;
         assert!(db.is_autocommit());
         let mut stmt = db.prepare("SELECT name FROM sqlite_master")?;
-        assert_eq!(TransactionState::None, db.transaction_state(None)?);
+        assert_eq!(TransactionState::None, db.transaction_state(DEFAULT_NAME)?);
         {
             let mut rows = stmt.query([])?;
             assert!(rows.next()?.is_some()); // start reading
-            assert_eq!(TransactionState::Read, db.transaction_state(None)?);
+            assert_eq!(TransactionState::Read, db.transaction_state(DEFAULT_NAME)?);
             db.execute("INSERT INTO t VALUES (1)", [])?; // auto-commit
-            assert_eq!(TransactionState::Read, db.transaction_state(None)?);
+            assert_eq!(TransactionState::Read, db.transaction_state(DEFAULT_NAME)?);
             assert!(rows.next()?.is_some()); // still reading
-            assert_eq!(TransactionState::Read, db.transaction_state(None)?);
+            assert_eq!(TransactionState::Read, db.transaction_state(DEFAULT_NAME)?);
             assert!(rows.next()?.is_none()); // end
-            assert_eq!(TransactionState::None, db.transaction_state(None)?);
+            assert_eq!(TransactionState::None, db.transaction_state(DEFAULT_NAME)?);
         }
         Ok(())
     }

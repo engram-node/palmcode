@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+palmcode-telemetry = { path = "../telemetry" }
 palmcode-exec = { path = "../exec" }
 palmcode-llm = { path = "../llm" }
 palmcode-perms = { path = "../perms" }

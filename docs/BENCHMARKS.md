@@ -1,7 +1,77 @@
 # BENCHMARKS
 
-Budgets and measured actuals. Nothing measured yet — M1 records the first
-per-turn overhead number; M6 publishes the full table.
+Budgets and measured actuals. Historical measurements below retain their
+original scope; the dated Stage 3 section records the current mock-device
+benchmark and its exact commands.
+
+## Stage 3 device mock measurements (2026-10-26)
+
+Device: motorola edge 50 neo (`adb shell getprop ro.product.model`), SDK 36
+(`adb shell getprop ro.build.version.sdk`). Install command:
+`adb install -r android/app/build/outputs/apk/bench/app-universal-bench.apk`.
+Build: `gradlew.bat :android:app:assembleBench :android:app:testBenchUnitTest`.
+Host mock build command: `cargo build --manifest-path core/Cargo.toml -p palmcode-bench --bin palmcode-bench`.
+The runner requires adb on PATH. Parser regression check:
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -SelfTest`.
+
+Each turn creates a fresh short session, reads benchmark.txt through the
+agent/tool protocol, and consumes a final mock text response. The database
+persists between runs. Native Rust is release optimized; the isolated,
+debug-signed bench JVM is debuggable and not optimized. No live provider,
+credential, UI tapping or screenshot was used. See ADR 0028.
+
+OVERHEAD measures end-of-tool-stream through JSON serialization and reqwest
+dispatch, including read execution and permission handling, excluding the
+next network wait. These are nearest-rank percentiles, not wall time minus
+an assumed server delay. Both headless runs meet the requested p95 < 50 ms
+budget; no performance optimization iteration was needed.
+
+| Run / raw samples | Gap p50 / p95 (ms) | Exact command |
+|---|---:|---|
+| [50 turns](results/stage3-050.json) | 27.779 / 38.168 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 50 -Result stage3-050.json` |
+| [200 turns](results/stage3-200.json) | 13.712 / 35.316 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 200 -Result stage3-200.json` |
+| [20 turns, paced UI](results/stage3-ui-100.json) | 19.601 / 27.615 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 20 -TokensPerSecond 100 -Ui -Result stage3-ui-100.json` |
+
+Phase entries below are p50 / p95 **milliseconds of per-turn sums** across
+both requests and terminal persistence, excluding session creation. They
+are not an additive decomposition of the single gap. Persistence dominates
+the measured local phases. Its barrier includes queue wait and FULL commit;
+connect includes request transmission and response-header wait, not just
+TCP setup. Detailed definitions are in ADR 0027.
+
+| Run | Persist | Request build | Serialize | Connect / headers | Dispatch | Exact command |
+|---|---:|---:|---:|---:|---:|---|
+| Headless | 35.222 / 61.440 | 0.989 / 1.619 | 0.233 / 0.441 | 16.557 / 25.200 | 0.333 / 0.622 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 50 -Result stage3-050.json` |
+| Headless | 23.571 / 49.532 | 0.664 / 1.612 | 0.161 / 0.455 | 11.128 / 22.052 | 0.210 / 0.479 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 200 -Result stage3-200.json` |
+| Paced UI | 33.920 / 52.848 | 0.896 / 1.760 | 0.222 / 0.319 | 14.524 / 18.452 | 0.283 / 0.376 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 20 -TokensPerSecond 100 -Ui -Result stage3-ui-100.json` |
+
+The UI run renders the app's actual MessageBubble/read-tool cards. The
+script schedules 100 synthetic content events/s, with 300 events per final
+response plus terminal framing. This is not a model tokenizer measurement.
+Measured server final-stream p50 / p95 is 3026.968 / 3033.568 ms, from
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/bench/run-stage3.ps1 -Turns 20 -TokensPerSecond 100 -Ui -Result stage3-ui-100.json`.
+The raw JSON includes individual server durations and exact mock, reverse,
+instrumentation and PID-filtered logcat commands, plus APK/mock hashes.
+
+| UI measurement | Observed | Exact collection command (during the paced UI command above) |
+|---|---|---|
+| Rendered / janky frames | 7361 / 7 (0.10%) | `adb shell dumpsys gfxinfo dev.palmcode.bench` |
+| Legacy janky frames | 6569 (89.24%) | `adb shell dumpsys gfxinfo dev.palmcode.bench` |
+| Frame p50 / p90 / p95 / p99 | 16 / 21 / 23 / 28 ms | `adb shell dumpsys gfxinfo dev.palmcode.bench` |
+| GPU p50 / p90 / p95 / p99 | 4 / 5 / 5 / 6 ms | `adb shell dumpsys gfxinfo dev.palmcode.bench` |
+| Deadline misses / legacy misses | 7 / 131 | `adb shell dumpsys gfxinfo dev.palmcode.bench` |
+
+The current and legacy jank counters disagree substantially. Preserve both;
+this is a measured result with an unresolved counter discrepancy, not an
+unqualified jank acceptance pass. Manual bash scrolling/Kill, notification,
+Doze and other device acceptance rows remain pending.
+
+Diagnostic samples are retained separately: `stage3-050-initial.json`,
+`stage3-200-initial-failed.json`, and `stage3-predispatch-*.json`. The first
+incomplete run reused tool-call IDs against the persistent database; the
+fixed fixture uses invocation-unique IDs. Earlier successful measurements
+ended before client serialization and are explicitly excluded from the
+tables and budget comparison above. No missing samples were substituted.
 
 | Budget | Target | Measured | Device | Date |
 |--------|--------|----------|--------|------|

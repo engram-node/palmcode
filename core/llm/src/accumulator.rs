@@ -12,6 +12,7 @@ struct Building {
     id: Option<String>,
     name: String,
     args: String,
+    extra_content: Option<crate::types::ToolMetadata>,
 }
 
 #[derive(Default)]
@@ -56,6 +57,9 @@ impl ToolAccumulator {
         if let Some(args) = &d.arguments {
             slot.args.push_str(args);
         }
+        if let Some(metadata) = &d.extra_content {
+            slot.extra_content = Some(metadata.clone());
+        }
     }
 
     /// Completed calls in index order. Calls with empty name are dropped;
@@ -63,13 +67,14 @@ impl ToolAccumulator {
     pub fn finish(self) -> Vec<ToolCallSpec> {
         let mut out: Vec<ToolCallSpec> = Vec::new();
         let mut push = |b: Building| {
-            if b.name.is_empty() {
+            if b.name.trim().is_empty() {
                 return;
             }
             out.push(ToolCallSpec {
                 id: b.id.unwrap_or_default(),
                 name: b.name,
                 arguments: b.args,
+                extra_content: b.extra_content,
             });
         };
         for (_, b) in self.by_index {
@@ -87,6 +92,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opaque_metadata_survives_early_and_late_parallel_deltas() {
+        use crate::types::{Message, ToolMetadata};
+        for late in [false, true] {
+            let mut acc = ToolAccumulator::new();
+            for index in 0..2 {
+                let metadata = ToolMetadata(
+                    serde_json::json!({"google":{"thought_signature":format!("fixture-signature-{index}")}}),
+                );
+                acc.push(&ToolCallDelta {
+                    index: Some(index),
+                    id: Some(format!("call-{index}")),
+                    name: Some("read".into()),
+                    arguments: Some("{".into()),
+                    extra_content: (!late).then_some(metadata.clone()),
+                });
+                acc.push(&ToolCallDelta {
+                    index: Some(index),
+                    arguments: Some("}".into()),
+                    extra_content: late.then_some(metadata),
+                    ..Default::default()
+                });
+            }
+            let wire =
+                serde_json::to_value(Message::assistant_tool_calls(acc.finish(), None)).unwrap();
+            for index in 0..2 {
+                assert_eq!(
+                    wire["tool_calls"][index]["extra_content"]["google"]["thought_signature"],
+                    format!("fixture-signature-{index}")
+                );
+                assert_eq!(wire["tool_calls"][index]["function"]["arguments"], "{}");
+            }
+        }
+    }
+
+    #[test]
     fn single_call_indexed() {
         let mut acc = ToolAccumulator::new();
         acc.push(&ToolCallDelta {
@@ -94,6 +134,7 @@ mod tests {
             id: Some("call_1".into()),
             name: Some("read".into()),
             arguments: None,
+            extra_content: None,
         });
         acc.push(&ToolCallDelta {
             index: Some(0),
@@ -121,12 +162,14 @@ mod tests {
             id: Some("a".into()),
             name: Some("x".into()),
             arguments: Some("{".into()),
+            extra_content: None,
         });
         acc.push(&ToolCallDelta {
             index: Some(1),
             id: Some("b".into()),
             name: Some("y".into()),
             arguments: Some("{\"q\":1".into()),
+            extra_content: None,
         });
         acc.push(&ToolCallDelta {
             index: Some(0),
@@ -154,6 +197,7 @@ mod tests {
             id: Some("z".into()),
             name: Some("f".into()),
             arguments: Some("{}".into()),
+            extra_content: None,
         });
         let calls = acc.finish();
         assert_eq!(calls.len(), 1);

@@ -1,0 +1,6 @@
+# 0017 Bash recovery ownership
+Status: accepted.
+Decision: serialize executor calls on Linux/Android while using process-wide child subreaping. Snapshot pre-existing direct children and sweep only newly adopted children whose start time is at or after the run began. Recheck parent and start time before killing, and reap killed adoptees. Always kill the process group when the leader exits. Startup pidfiles require PID, start time and boot ID; legacy records are discarded without signalling.
+Reason: concurrent runs cannot safely claim an adopted setsid child using PPID and time alone. Serial execution provides ownership during a run without a separate supervisor process. It also preserves pre-existing application children.
+Rejected: concurrent PPID-only scans (can kill another run); process-group-only cleanup (setsid escapes); a dedicated supervisor per call (additional protocol and lifecycle complexity).
+Limits: startup recovery can verify the recorded leader only while it exists. Detached descendants after an engine crash can outlive that identity; same-UID malicious commands remain outside confinement guarantees. Windows lacks /proc identity and subreaping, so these recovery guarantees apply to Linux/Android.

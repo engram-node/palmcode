@@ -18,81 +18,22 @@ pub enum Outcome {
     Deny(String),
 }
 
-/// Paths a script may mention absolutely: the workspace plus scratch space.
-/// (/dev/null-style literals are handled separately.)
+/// Workspace used by the file tools' canonical path policy.
 pub struct ClassCtx {
     pub workspace: PathBuf,
-    pub extra_roots: Vec<PathBuf>,
+    auto: bool,
+    remember: bool,
 }
 
 impl ClassCtx {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
-            extra_roots: Vec::new(),
+            auto: false,
+            remember: false,
         }
     }
 }
-
-/// Commands that cannot write and cannot run other commands.
-const READ_ONLY: &[&str] = &[
-    "basename",
-    "cat",
-    "cut",
-    "date",
-    "dd",
-    "df",
-    "diff",
-    "dirname",
-    "du",
-    "echo",
-    "false",
-    "file",
-    "fgrep",
-    "grep",
-    "egrep",
-    "head",
-    "id",
-    "ls",
-    "md5sum",
-    "nproc",
-    "printenv",
-    "printf",
-    "pwd",
-    "readlink",
-    "realpath",
-    "rg",
-    "seq",
-    "sha1sum",
-    "sha256sum",
-    "sha512sum",
-    "sleep",
-    "sort",
-    "stat",
-    "tail",
-    "tr",
-    "true",
-    "uname",
-    "uniq",
-    "wc",
-    "which",
-    "whoami",
-];
-
-/// Network-capable: never Allow.
-const NETWORK: &[&str] = &[
-    "curl", "wget", "ftp", "ifconfig", "ip", "nc", "ncat", "netcat", "nmap", "ping", "rsync",
-    "scp", "sftp", "ssh", "telnet",
-];
-
-/// Interpreters/build tools: whatever they run is opaque -> Ask.
-const INTERPRETERS: &[&str] = &[
-    "awk", "busybox", "cmake", "dash", "expect", "irb", "java", "javac", "lua", "make", "node",
-    "perl", "php", "python", "python3", "ruby", "sed", "sqlite3",
-];
-
-/// Wrappers whose first real argument is itself a command to classify.
-const WRAPPERS: &[&str] = &["env", "command", "nice", "nohup", "time", "timeout"];
 
 fn rank(o: &Outcome) -> u8 {
     match o {
@@ -118,6 +59,29 @@ pub fn classify(cmd: &str, ctx: &ClassCtx) -> Outcome {
         Ok(v) => v,
         Err(reason) => Outcome::Ask(format!("unparseable command: {reason}")),
     }
+}
+
+/// Classify eligibility for unattended execution, failing closed on unknown effects.
+pub fn unattended(cmd: &str, ctx: &ClassCtx) -> Outcome {
+    classify(
+        cmd,
+        &ClassCtx {
+            workspace: ctx.workspace.clone(),
+            auto: true,
+            remember: false,
+        },
+    )
+}
+
+pub fn revalidate_grant(cmd: &str, ctx: &ClassCtx) -> Outcome {
+    classify(
+        cmd,
+        &ClassCtx {
+            workspace: ctx.workspace.clone(),
+            auto: true,
+            remember: true,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +612,11 @@ fn consume_heredoc(
 
 fn classify_command(words: &[Word], ctx: &ClassCtx) -> Result<Outcome, String> {
     let Some(cmd) = words.iter().find(|w| !w.is_assignment()) else {
-        return Ok(Outcome::Allow); // pure assignments
+        return Ok(if words.is_empty() {
+            Outcome::Allow
+        } else {
+            Outcome::Ask("environment assignments require approval".into())
+        });
     };
     let name = cmd.lit.trim();
     let mut verdict = Outcome::Allow;
@@ -679,99 +647,200 @@ fn classify_command(words: &[Word], ctx: &ClassCtx) -> Result<Outcome, String> {
         .map(|w| w.lit.trim())
         .collect();
 
-    let v = match name {
-        "find" => {
-            if args.iter().any(|a| {
-                matches!(
-                    *a,
-                    "-delete"
-                        | "-exec"
-                        | "-execdir"
-                        | "-ok"
-                        | "-okdir"
-                        | "-fls"
-                        | "-fprint"
-                        | "-fprint0"
-                        | "-fprintf"
-                )
-            }) {
-                Outcome::Ask("find with a write/exec action".into())
-            } else {
-                Outcome::Allow
-            }
+    if ctx.auto {
+        if matches!(
+            name,
+            "git"
+                | "curl"
+                | "wget"
+                | "nc"
+                | "ncat"
+                | "netcat"
+                | "ssh"
+                | "scp"
+                | "sftp"
+                | "ftp"
+                | "telnet"
+                | "ping"
+                | "ping6"
+                | "nslookup"
+                | "dig"
+                | "http"
+                | "https"
+                | "busybox"
+                | "sh"
+                | "bash"
+                | "ash"
+                | "dash"
+                | "zsh"
+                | "env"
+                | "eval"
+                | "exec"
+                | "command"
+                | "timeout"
+                | "nice"
+                | "nohup"
+                | "setsid"
+                | "xargs"
+                | "source"
+                | "."
+        ) {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("network or wrapper command requires approval".into()),
+            ));
         }
-        "sort" if args.contains(&"-o") => Outcome::Ask("sort -o writes a file".into()),
-        "sh" | "bash" | "ash" | "dash" | "zsh" | "rbash" => {
-            // only `sh -c <script>`: classify the script text itself
-            match args
-                .iter()
-                .position(|a| *a == "-c")
-                .and_then(|p| args.get(p + 1))
-            {
-                Some(script) => classify(script, ctx),
-                None => Outcome::Ask("shell without -c runs an opaque script".into()),
-            }
+        let mutating = matches!(
+            name,
+            "mkdir"
+                | "touch"
+                | "cp"
+                | "mv"
+                | "rm"
+                | "rmdir"
+                | "chmod"
+                | "chown"
+                | "truncate"
+                | "tee"
+        );
+        if words
+            .iter()
+            .any(|w| w.dynamic || w.is_assignment() || w.lit.contains(['*', '?', '[', ']', '~']))
+        {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("dynamic command requires approval".into()),
+            ));
         }
-        _ if WRAPPERS.contains(&name) => {
-            // wrappers run the first non-flag, non-assignment argument;
-            // duration-like tokens (`timeout 5`, `nice -n 5`) are wrapper args
-            let mut inner: Vec<Word> = words
-                .iter()
-                .filter(|w| !w.is_assignment())
-                .skip(1)
-                .cloned()
-                .collect();
-            while inner
-                .first()
-                .map(|w| {
-                    w.lit.starts_with('-')
-                        || w.lit.contains('=')
-                        || w.lit
-                            .chars()
-                            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 's' | 'm' | 'h' | 'd'))
-                })
-                .unwrap_or(false)
-            {
-                inner.remove(0);
+        if mutating {
+            // Recursive operations can reach protected descendants that are not
+            // explicit operands. Never infer those effects from the command text.
+            for arg in &args {
+                if arg.starts_with('-')
+                    && (arg.contains('r') || arg.contains('R') || arg.starts_with("--"))
+                {
+                    return Ok(max(
+                        verdict,
+                        Outcome::Ask("recursive or extended mutation requires approval".into()),
+                    ));
+                }
+                if !arg.starts_with('-')
+                    && resolve(arg, ctx).is_some_and(|p| p == ctx.workspace || p.is_dir())
+                    && name != "mkdir"
+                {
+                    return Ok(max(
+                        verdict,
+                        Outcome::Ask("directory mutation requires approval".into()),
+                    ));
+                }
             }
-            if inner.is_empty() {
-                Outcome::Allow
-            } else {
-                classify_command(&inner, ctx)?
-            }
+            return Ok(verdict);
         }
-        "git" => {
-            let sub = args.first().copied().unwrap_or("");
-            if matches!(
-                sub,
-                "status"
-                    | "log"
-                    | "diff"
-                    | "show"
-                    | "blame"
-                    | "grep"
-                    | "rev-parse"
-                    | "ls-files"
-                    | "ls-tree"
-                    | "describe"
-                    | "shortlog"
-                    | "version"
-                    | "help"
-            ) {
-                Outcome::Allow
-            } else {
-                Outcome::Ask(format!("git {sub} can mutate the repository"))
-            }
+        if !ctx.remember && !readonly_grammar(name, &args) {
+            return Ok(max(
+                verdict,
+                Outcome::Ask("command effects require explicit approval".into()),
+            ));
         }
-        "eval" | "exec" | "source" | "." => Outcome::Ask(format!("{name} runs opaque code")),
-        _ if READ_ONLY.contains(&name) => Outcome::Allow,
-        _ if NETWORK.contains(&name) => Outcome::Ask(format!("{name} touches the network")),
-        _ if INTERPRETERS.contains(&name) => Outcome::Ask(format!("{name} runs opaque code")),
-        _ => Outcome::Ask(format!(
-            "command `{name}` is not on the read-only allowlist"
-        )),
+        if ctx.remember {
+            return Ok(verdict);
+        }
+    }
+
+    let v = if matches!(name, "sh" | "bash" | "ash" | "dash" | "zsh" | "rbash") {
+        // Inspect nested scripts for Deny, but never auto-approve a wrapper.
+        let nested = args
+            .windows(2)
+            .find(|a| a[0] == "-c")
+            .map(|a| classify(a[1], ctx))
+            .unwrap_or(Outcome::Allow);
+        max(
+            nested,
+            Outcome::Ask("shell wrapper requires approval".into()),
+        )
+    } else if words.iter().any(Word::is_assignment) {
+        Outcome::Ask("environment assignments require approval".into())
+    } else if readonly_grammar(name, &args) {
+        Outcome::Allow
+    } else {
+        Outcome::Ask(format!(
+            "command `{name}` or its arguments require approval"
+        ))
     };
     Ok(max(verdict, v))
+}
+
+/// Deliberately exact options: no combined, attached, abbreviated, or long
+/// variants are inferred. Git stays Ask until executor configuration is pinned.
+fn readonly_grammar(name: &str, args: &[&str]) -> bool {
+    let (flags, valued, min, max): (&[&str], &[&str], usize, usize) = match name {
+        "ls" => (&["-a", "-l", "-h", "-R", "-1"], &[], 0, 1),
+        "cat" => (&["-n", "-b", "-s", "-v", "-E", "-T"], &[], 0, 1),
+        "head" => (&["-q", "-v"], &["-n", "-c"], 0, 1),
+        "tail" => (&["-q", "-v", "-f"], &["-n", "-c"], 0, 1),
+        "wc" => (&["-l", "-w", "-c", "-m", "-L"], &[], 0, 1),
+        "pwd" => (&["-L", "-P"], &[], 0, 0),
+        "echo" => (&["-n", "-e", "-E"], &[], 0, 32),
+        "printf" => (&[], &[], 1, 32),
+        "grep" => (
+            &["-r", "-n", "-i", "-v", "-l", "-c", "-F", "-E", "-w", "-q"],
+            &[],
+            1,
+            2,
+        ),
+        "rg" => (&["-n", "-i", "-v", "-l", "-c", "-F", "-w", "-q"], &[], 1, 2),
+        "find" => (
+            &["-print", "-print0"],
+            &["-name", "-type", "-maxdepth", "-mindepth"],
+            1,
+            1,
+        ),
+        "sort" => (&["-n", "-r", "-u", "-f", "-b"], &[], 0, 1),
+        "uniq" => (&["-c", "-d", "-u", "-i"], &[], 0, 1),
+        "cut" => (&["-s"], &["-d", "-f", "-b", "-c"], 0, 1),
+        "tr" => (&["-d", "-s", "-c", "-C"], &[], 1, 2),
+        "basename" => (&[], &[], 1, 2),
+        "dirname" => (&[], &[], 1, 1),
+        "stat" => (&["-L"], &[], 1, 1),
+        _ => return false,
+    };
+    let mut operands = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if valued.contains(arg) {
+            let Some(value) = args.next() else {
+                return false;
+            };
+            let valid = match *arg {
+                "-n" | "-c" if matches!(name, "head" | "tail") => {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                }
+                "-maxdepth" | "-mindepth" => {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                }
+                "-type" => matches!(*value, "f" | "d" | "l"),
+                "-d" => value.chars().count() == 1,
+                "-f" | "-b" | "-c" => {
+                    !value.is_empty()
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'-'))
+                }
+                "-name" => !value.starts_with('-') && !value.contains('/'),
+                _ => false,
+            };
+            if !valid {
+                return false;
+            }
+        } else if arg.starts_with('-') {
+            if !flags.contains(arg) {
+                return false;
+            }
+        } else {
+            operands += 1;
+        }
+    }
+    (min..=max).contains(&operands)
 }
 
 /// A write redirection target: /dev/null is free, inside-workspace writes ask
@@ -780,6 +849,19 @@ fn check_write_target(target: &str, ctx: &ClassCtx) -> Outcome {
     let t = target.trim();
     if t.is_empty() || is_dev_null(t) {
         return Outcome::Allow;
+    }
+    if t.contains(['~', '$', '`']) {
+        return Outcome::Ask("path contains shell expansion syntax".into());
+    }
+    if ctx.auto {
+        let checked = check_read_target(t, ctx);
+        if checked != Outcome::Allow {
+            return checked;
+        }
+        if resolve(t, ctx).is_some_and(|p| p != ctx.workspace && !p.is_dir()) {
+            return Outcome::Allow;
+        }
+        return Outcome::Ask("directory write requires approval".into());
     }
     match resolve(t, ctx) {
         Some(p) => {
@@ -799,25 +881,59 @@ fn check_write_target(target: &str, ctx: &ClassCtx) -> Outcome {
 
 fn check_read_target(target: &str, ctx: &ClassCtx) -> Outcome {
     let t = target.trim();
-    if t.is_empty() || is_dev_null(t) || t.starts_with('-') {
-        return Outcome::Allow; // flags are not paths
-    }
-    // only path-looking literals are containment-checked
-    let pathish = t.starts_with('/') || t.starts_with('~') || t.split('/').any(|s| s == "..");
-    if !pathish {
+    let t = if t.starts_with('-') {
+        match t.split_once('=') {
+            Some((_, value)) => value,
+            None => return Outcome::Allow,
+        }
+    } else {
+        t
+    };
+    if t.is_empty() {
         return Outcome::Allow;
     }
-    match resolve(t, ctx) {
-        Some(p)
-            if p.starts_with(&ctx.workspace)
-                || ctx.extra_roots.iter().any(|r| p.starts_with(r)) =>
-        {
-            Outcome::Allow
-        }
-        _ => Outcome::Deny(format!("outside the workspace: {t}")),
+    if t == ":" {
+        return Outcome::Allow; // single-character text delimiter
+    }
+    if t.contains("://") {
+        return Outcome::Ask("URL operand requires approval".into());
+    }
+    if t.contains(['~', '$', '`']) {
+        return Outcome::Ask("path contains shell expansion syntax".into());
+    }
+    // Use precisely the same canonical existing-prefix resolution as file tools.
+    let roots = match palmcode_tools::RootSet::new([ctx.workspace.clone()]) {
+        Ok(roots) => roots,
+        Err(_) => return Outcome::Ask("workspace paths unavailable".into()),
+    };
+    let resolved = match roots.resolve(t, None) {
+        Ok(path) => path,
+        Err(_) => return Outcome::Deny(format!("outside the workspace: {t}")),
+    };
+    let secret = |path: &Path| {
+        path.components().any(|c| {
+            let name = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+            name.starts_with(".env")
+                || name.ends_with(".pem")
+                || name.starts_with("id_rsa")
+                || name.ends_with(".key")
+                || name.starts_with("credentials")
+        })
+    };
+    if ctx.auto
+        && [Path::new(t), resolved.as_path()].iter().any(|path| {
+            path.components()
+                .any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".palmcode")
+        })
+    {
+        return Outcome::Ask("protected workspace metadata requires approval".into());
+    }
+    if secret(Path::new(t)) || secret(&resolved) {
+        Outcome::Ask(format!("secret-file read: {t}"))
+    } else {
+        Outcome::Allow
     }
 }
-
 fn is_dev_null(t: &str) -> bool {
     matches!(
         t,
@@ -825,37 +941,10 @@ fn is_dev_null(t: &str) -> bool {
     )
 }
 
-/// Lexical resolution (no filesystem access): workspace-relative joins, `~`
-/// maps to the workspace home (the bash tool sets HOME = workspace root).
-/// `None` = not statically resolvable (`~user` = someone else's home).
+/// Canonical containment shared with file tools; no scratch-root exceptions.
 fn resolve(t: &str, ctx: &ClassCtx) -> Option<PathBuf> {
-    let expanded: PathBuf = if let Some(rest) = t.strip_prefix("~/") {
-        ctx.workspace.join(rest)
-    } else if t == "~" {
-        ctx.workspace.clone()
-    } else if t.starts_with('~') {
-        return None; // ~user: another user's home directory
-    } else if t.starts_with('/') {
-        PathBuf::from(t)
-    } else {
-        ctx.workspace.join(t)
-    };
-    Some(normalize(&expanded))
-}
-
-fn normalize(p: &Path) -> PathBuf {
-    use std::path::Component::*;
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            ParentDir => {
-                out.pop();
-            }
-            CurDir => {}
-            Normal(s) => out.push(s),
-            RootDir => out.push("/"),
-            Prefix(pr) => out.push(pr.as_os_str()),
-        }
-    }
-    out
+    palmcode_tools::RootSet::new([ctx.workspace.clone()])
+        .ok()?
+        .resolve(t, None)
+        .ok()
 }

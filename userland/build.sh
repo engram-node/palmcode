@@ -124,7 +124,30 @@ for ABI in $ABIS; do
   B="$CACHE/build/busybox-$ABI"
   mkdir -p "$B"
   # MSYS2 POSIX gcc is HOSTCC for kbuild (rustup's self-contained gcc lacks cc1).
-  make -C "$BB_SRC" O="$B" defconfig HOSTCC=gcc >/dev/null
+  make -C "$BB_SRC" O="$B" allnoconfig HOSTCC=gcc >/dev/null
+  # Only the reviewed applets are built, not merely hidden from PATH.
+  enable_bb() {
+    sed -i -e "/^CONFIG_${1}=/d" -e "/^# CONFIG_${1} is not set$/d" "$B/.config"
+    echo "CONFIG_${1}=y" >> "$B/.config"
+  }
+  while read -r APPLET SYMBOL; do
+    [[ -z "$APPLET" || "$APPLET" == \#* ]] && continue
+    enable_bb "$SYMBOL"
+  done < "$ROOT/userland/busybox-applets.txt"
+  sed -i -e '/^CONFIG_SH_IS_NONE=/d' "$B/.config"
+  for FEATURE in DESKTOP LONG_OPTS SHOW_USAGE FEATURE_VERBOSE_USAGE FEATURE_COMPRESS_USAGE \
+      FEATURE_SH_MATH FEATURE_SH_MATH_64 ASH_BASH_COMPAT ASH_ECHO ASH_PRINTF ASH_TEST \
+      ASH_GETOPTS ASH_CMDCMD ASH_ALIAS ASH_OPTIMIZE_FOR_SIZE \
+      FEATURE_TAR_CREATE FEATURE_TAR_AUTODETECT FEATURE_TAR_GNU_EXTENSIONS \
+      FEATURE_TAR_LONG_OPTIONS FEATURE_SEAMLESS_GZ FEATURE_SEAMLESS_BZ2 FEATURE_SEAMLESS_XZ \
+      FEATURE_FIND_PRINT0 FEATURE_FIND_TYPE FEATURE_FIND_XDEV FEATURE_FIND_MAXDEPTH \
+      FEATURE_FIND_NEWER FEATURE_FIND_INUM FEATURE_FIND_EXEC FEATURE_FIND_EXEC_PLUS \
+      FEATURE_CP_LONG_OPTIONS FEATURE_MKDIR_LONG_OPTIONS FEATURE_LS_COLOR FEATURE_LS_RECURSIVE \
+      FEATURE_LS_SORTFILES FEATURE_LS_TIMESTAMPS FEATURE_LS_FILETYPES FEATURE_LS_FOLLOWLINKS \
+      FEATURE_STAT_FORMAT FEATURE_DU_DEFAULT_BLOCKSIZE_1K FEATURE_DD_IBS_OBS \
+      FEATURE_DD_STATUS FEATURE_DD_THIRD_STATUS_LINE FEATURE_DD_SIGNAL_HANDLING; do
+    enable_bb "$FEATURE"
+  done
   # bionic/kernel-console hostile family (see spike notes: utmp/wtmp, sys/kd.h,
   # gethostid, tc sched, /etc/shells loginutils, SysV IPC, swapon, minix fs,
   # big nslookup needs resolver state bionic folded into libc).
@@ -162,6 +185,15 @@ EOF
   echo "== busybox $BUSYBOX_VERSION ($ABI)"
   make -C "$BB_SRC" O="$B" -j"$(nproc)" CC="$T"29-clang ARCH="$ABI" HOSTCC=gcc \
        SKIP_STRIP=y EXTRA_CFLAGS="-include $CACHE/build/bzero-shim.h"
+  # Compare the compiled dispatch table, allowlist and Rust prompt catalog.
+  # No Android executable is run on the build host.
+  sed -n 's/^"\([^"]*\)" "\\0"$/\1/p' "$B/include/applet_tables.h" | LC_ALL=C sort > "$B/actual-applets"
+  awk 'NF && $1 !~ /^#/ {print $1}' "$ROOT/userland/busybox-applets.txt" | LC_ALL=C sort > "$B/expected-applets"
+  awk -F'"' '/^    "/ {print $2}' "$ROOT/core/exec/src/applets.rs" | LC_ALL=C sort > "$B/catalog-applets"
+  diff -u "$B/expected-applets" "$B/actual-applets"
+  diff -u "$B/expected-applets" "$B/catalog-applets"
+  COUNT=$(wc -l < "$B/actual-applets")
+  [ "$COUNT" -ge 100 ] && [ "$COUNT" -le 150 ] || { echo "applet count outside reviewed range" >&2; exit 1; }
   package "$B/busybox" "$ABI" busybox
 done
 

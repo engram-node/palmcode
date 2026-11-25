@@ -294,12 +294,25 @@ impl Client {
         req: &ChatRequest,
         tx: mpsc::UnboundedSender<ClientEvent>,
     ) -> Result<TurnOutcome, LlmError> {
+        self.chat_with_gap(req, tx, None).await
+    }
+
+    /// Optional tool-stream origin; the gap ends after serialization at dispatch.
+    pub async fn chat_with_gap(
+        &self,
+        req: &ChatRequest,
+        tx: mpsc::UnboundedSender<ClientEvent>,
+        gap_start: Option<Instant>,
+    ) -> Result<TurnOutcome, LlmError> {
         let started = Instant::now();
         let mut backoff = BACKOFF.iter().copied();
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.chat_attempt(req, &tx).await {
+            match self
+                .chat_attempt(req, &tx, if attempt == 1 { gap_start } else { None })
+                .await
+            {
                 Ok(mut out) => {
                     out.retries = attempt - 1;
                     out.elapsed = started.elapsed();
@@ -327,30 +340,43 @@ impl Client {
         &self,
         req: &ChatRequest,
         tx: &mpsc::UnboundedSender<ClientEvent>,
+        gap_start: Option<Instant>,
     ) -> Result<TurnOutcome, AttemptError> {
         let no_ra = |err| AttemptError {
             err,
             retry_after: None,
         };
         let body = builder::body_bytes(req).map_err(no_ra)?;
+        let dispatch = palmcode_telemetry::Phase::start("dispatch");
+        let request = self
+            .authed(self.http.post(format!("{}/chat/completions", self.base)))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .build()
+            .map_err(|e| no_ra(self.net_err(e)))?;
+        let send = self.http.execute(request);
+        drop(dispatch);
+        if let Some(start) = gap_start {
+            palmcode_telemetry::alog(&format!(
+                "OVERHEAD turn_gap_us={}",
+                start.elapsed().as_micros()
+            ));
+        }
         let t0 = Instant::now();
         // first-token budget covers EVERYTHING up to the first SSE byte:
         // connect, request write, response headers, server prefill time.
         // connect() itself is additionally capped at CONNECT_TIMEOUT.
-        let response = tokio::time::timeout(
-            self.timeouts.first_token,
-            self.authed(self.http.post(format!("{}/chat/completions", self.base)))
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            no_ra(LlmError::FirstTokenTimeout(
-                self.timeouts.first_token.as_secs(),
-            ))
-        })?
-        .map_err(|e| no_ra(self.net_err(e)))?;
+        let response = {
+            let _phase = palmcode_telemetry::Phase::start("connect");
+            tokio::time::timeout(self.timeouts.first_token, send)
+                .await
+                .map_err(|_| {
+                    no_ra(LlmError::FirstTokenTimeout(
+                        self.timeouts.first_token.as_secs(),
+                    ))
+                })?
+                .map_err(|e| no_ra(self.net_err(e)))?
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -382,7 +408,12 @@ impl Client {
         let mut stream = response.bytes_stream();
         let mut saw_finish = false;
         let mut saw_done = false;
-        loop {
+        let mut response_text = String::new();
+        let mut reasoning_bytes = 0usize;
+        let mut tool_deltas = 0usize;
+        let mut tool_name_deltas = 0usize;
+        let mut eof_events = 0usize;
+        'stream: loop {
             // Before the first SSE byte the per-read budget is whatever
             // remains of the first-token timeout; after it, the idle-stall
             // timeout applies between chunks.
@@ -394,10 +425,14 @@ impl Client {
             } else {
                 self.timeouts.idle
             };
-            let item = match tokio::time::timeout(budget, stream.next()).await {
-                Ok(Some(Ok(bytes))) => bytes,
+            let (payloads, eof) = match tokio::time::timeout(budget, stream.next()).await {
+                Ok(Some(Ok(bytes))) => (parser.feed(&bytes), false),
                 Ok(Some(Err(e))) => return Err(no_ra(self.net_err(e))),
-                Ok(None) => break, // server closed the socket
+                Ok(None) => {
+                    let pending = std::mem::take(&mut parser).finish();
+                    eof_events = pending.len();
+                    (pending, true)
+                }
                 Err(_) => {
                     return Err(no_ra(if outcome.ttft.is_none() {
                         LlmError::FirstTokenTimeout(self.timeouts.first_token.as_secs())
@@ -406,18 +441,20 @@ impl Client {
                     }));
                 }
             };
-            for payload in parser.feed(&item) {
+            for payload in payloads {
                 if payload.trim() == "[DONE]" {
                     saw_done = true;
-                    continue;
-                }
-                if outcome.ttft.is_none() {
-                    let ttft = t0.elapsed();
-                    outcome.ttft = Some(ttft);
-                    let _ = tx.send(ClientEvent::FirstToken { ttft });
+                    break 'stream;
                 }
                 let chunk = types::parse_chunk(&payload).map_err(no_ra)?;
                 if let Some(c) = chunk {
+                    if outcome.ttft.is_none()
+                        && (c.text.is_some() || c.reasoning.is_some() || !c.tool_deltas.is_empty())
+                    {
+                        let ttft = t0.elapsed();
+                        outcome.ttft = Some(ttft);
+                        let _ = tx.send(ClientEvent::FirstToken { ttft });
+                    }
                     if c.has_usage_object {
                         outcome.usage_chunks += 1;
                     }
@@ -426,13 +463,31 @@ impl Client {
                         let _ = tx.send(ClientEvent::Usage(u));
                     }
                     if let Some((field, text)) = &c.reasoning {
+                        reasoning_bytes += text.len();
                         outcome.reasoning_field = Some(*field);
                         let _ = tx.send(ClientEvent::Reasoning(*field, text.clone()));
                     }
                     if let Some(t) = &c.text {
-                        let _ = tx.send(ClientEvent::Text(t.clone()));
+                        let delta = if c.full_message {
+                            // A terminal full message can repeat or complete the
+                            // text already streamed. Append only its missing tail.
+                            t.strip_prefix(&response_text).unwrap_or("")
+                        } else {
+                            t.as_str()
+                        };
+                        if !delta.is_empty() {
+                            let delta = delta.to_owned();
+                            response_text.push_str(&delta);
+                            let _ = tx.send(ClientEvent::Text(delta));
+                        }
                     }
                     if !c.tool_deltas.is_empty() {
+                        tool_deltas += c.tool_deltas.len();
+                        tool_name_deltas += c
+                            .tool_deltas
+                            .iter()
+                            .filter(|d| d.name.as_ref().is_some_and(|name| !name.trim().is_empty()))
+                            .count();
                         for d in &c.tool_deltas {
                             acc.push(d);
                         }
@@ -444,14 +499,39 @@ impl Client {
                     }
                 }
             }
+            if eof {
+                break;
+            }
         }
         // tolerate a missing [DONE] only when a finish_reason was seen
         if !saw_done && !saw_finish {
             return Err(no_ra(LlmError::PrematureEof));
         }
-        let _calls = acc.finish(); // M1: accumulator warm, no tools executed
+        let calls = acc.finish();
         if outcome.finish_reason.is_empty() {
             outcome.finish_reason = "stop".into();
+        }
+        let finish = match outcome.finish_reason.as_str() {
+            "stop" => "stop",
+            "length" => "length",
+            "tool_calls" => "tool_calls",
+            "content_filter" => "content_filter",
+            _ => "other",
+        };
+        let text_bytes = response_text.len();
+        palmcode_telemetry::alog(&format!(
+            "STREAM text_bytes={text_bytes} reasoning_bytes={reasoning_bytes} tool_deltas={tool_deltas} finish={finish} tool_names={tool_name_deltas} complete_calls={} eof_events={eof_events}",
+            calls.len()
+        ));
+        if response_text.trim().is_empty() && reasoning_bytes == 0 && calls.is_empty() {
+            if tool_deltas > 0 {
+                return Err(no_ra(LlmError::Decode(
+                    "Provider sent an incomplete tool call without a function name. No tool was executed; retry the message.".into()
+                )));
+            }
+            return Err(no_ra(LlmError::Decode(format!(
+                "Provider returned no response text, reasoning or tool calls (finish: {finish})"
+            ))));
         }
         Ok(outcome)
     }

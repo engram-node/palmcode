@@ -1,21 +1,20 @@
 //! [Session Extension](https://sqlite.org/sessionintro.html)
-#![allow(non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char, c_int, c_uchar, c_void};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
-use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::panic::catch_unwind;
 use std::ptr;
-use std::slice::{from_raw_parts, from_raw_parts_mut};
 
 use fallible_streaming_iterator::FallibleStreamingIterator;
 
-use crate::error::{check, error_from_sqlite_code, Error};
+use crate::error::{Error, check, error_from_sqlite_code};
 use crate::ffi;
 use crate::hooks::Action;
 use crate::types::ValueRef;
-use crate::{errmsg_to_string, str_to_cstring, Connection, DatabaseName, Result};
+use crate::util::{from_raw_parts, from_raw_parts_mut};
+use crate::{Connection, MAIN_DB, Name, Result, errmsg_to_string};
 
 // https://sqlite.org/session.html
 
@@ -33,16 +32,13 @@ impl Session<'_> {
     /// Create a new session object
     #[inline]
     pub fn new(db: &Connection) -> Result<Session<'_>> {
-        Session::new_with_name(db, DatabaseName::Main)
+        Session::new_with_name(db, MAIN_DB)
     }
 
     /// Create a new session object
     #[inline]
-    pub fn new_with_name<'conn>(
-        db: &'conn Connection,
-        name: DatabaseName<'_>,
-    ) -> Result<Session<'conn>> {
-        let name = name.as_cstring()?;
+    pub fn new_with_name<N: Name>(db: &Connection, name: N) -> Result<Session<'_>> {
+        let name = name.as_cstr()?;
 
         let db = db.db.borrow_mut().db;
 
@@ -68,14 +64,16 @@ impl Session<'_> {
         where
             F: Fn(&str) -> bool,
         {
-            let tbl_name = CStr::from_ptr(tbl_str).to_str();
-            c_int::from(
-                catch_unwind(|| {
-                    let boxed_filter: *mut F = p_arg.cast::<F>();
-                    (*boxed_filter)(tbl_name.expect("non-utf8 table name"))
-                })
-                .unwrap_or_default(),
-            )
+            unsafe {
+                let tbl_name = CStr::from_ptr(tbl_str).to_str();
+                c_int::from(
+                    catch_unwind(|| {
+                        let boxed_filter: *mut F = p_arg.cast::<F>();
+                        (*boxed_filter)(tbl_name.expect("non-utf8 table name"))
+                    })
+                    .unwrap_or_default(),
+                )
+            }
         }
 
         match filter {
@@ -94,17 +92,13 @@ impl Session<'_> {
                 unsafe { ffi::sqlite3session_table_filter(self.s, None, ptr::null_mut()) }
                 self.filter = None;
             }
-        };
+        }
     }
 
     /// Attach a table. `None` means all tables.
-    pub fn attach(&mut self, table: Option<&str>) -> Result<()> {
-        let table = if let Some(table) = table {
-            Some(str_to_cstring(table)?)
-        } else {
-            None
-        };
-        let table = table.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null());
+    pub fn attach<N: Name>(&mut self, table: Option<N>) -> Result<()> {
+        let cs = table.as_ref().map(N::as_cstr).transpose()?;
+        let table = cs.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null());
         check(unsafe { ffi::sqlite3session_attach(self.s, table) })
     }
 
@@ -153,9 +147,9 @@ impl Session<'_> {
     }
 
     /// Load the difference between tables.
-    pub fn diff(&mut self, from: DatabaseName<'_>, table: &str) -> Result<()> {
-        let from = from.as_cstring()?;
-        let table = str_to_cstring(table)?;
+    pub fn diff<D: Name, N: Name>(&mut self, from: N, table: N) -> Result<()> {
+        let from = from.as_cstr()?;
+        let table = table.as_cstr()?;
         let table = table.as_ptr();
         unsafe {
             let mut errmsg = ptr::null_mut();
@@ -333,7 +327,7 @@ impl ChangesetIter<'_> {
 }
 
 impl FallibleStreamingIterator for ChangesetIter<'_> {
-    type Error = crate::error::Error;
+    type Error = Error;
     type Item = ChangesetItem;
 
     #[inline]
@@ -515,7 +509,7 @@ impl ChangesetItem {
                 &mut pks,
                 &mut number_of_columns,
             ))?;
-            Ok(from_raw_parts(pks, number_of_columns as usize))
+            Ok(from_raw_parts(pks, number_of_columns))
         }
     }
 }
@@ -666,7 +660,6 @@ impl Connection {
 #[repr(i32)]
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[allow(clippy::upper_case_acronyms)]
 pub enum ConflictType {
     UNKNOWN = -1,
     SQLITE_CHANGESET_DATA = ffi::SQLITE_CHANGESET_DATA,
@@ -694,7 +687,6 @@ impl From<i32> for ConflictType {
 #[repr(i32)]
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[allow(clippy::upper_case_acronyms)]
 pub enum ConflictAction {
     SQLITE_CHANGESET_OMIT = ffi::SQLITE_CHANGESET_OMIT,
     SQLITE_CHANGESET_REPLACE = ffi::SQLITE_CHANGESET_REPLACE,
@@ -706,18 +698,20 @@ where
     F: Fn(&str) -> bool + Send + 'static,
     C: Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static,
 {
-    let tbl_name = CStr::from_ptr(tbl_str).to_str();
-    c_int::from(
-        catch_unwind(|| {
-            let tuple: *mut (Option<F>, C) = p_ctx.cast::<(Option<F>, C)>();
-            if let Some(ref filter) = (*tuple).0 {
-                filter(tbl_name.expect("illegal table name"))
-            } else {
-                true
-            }
-        })
-        .unwrap_or_default(),
-    )
+    unsafe {
+        let tbl_name = CStr::from_ptr(tbl_str).to_str();
+        c_int::from(
+            catch_unwind(|| {
+                let tuple: *mut (Option<F>, C) = p_ctx.cast::<(Option<F>, C)>();
+                if let Some(ref filter) = (*tuple).0 {
+                    filter(tbl_name.expect("illegal table name"))
+                } else {
+                    true
+                }
+            })
+            .unwrap_or_default(),
+        )
+    }
 }
 
 unsafe extern "C" fn call_conflict<F, C>(
@@ -731,13 +725,15 @@ where
 {
     let conflict_type = ConflictType::from(e_conflict);
     let item = ChangesetItem { it: p };
-    if let Ok(action) = catch_unwind(|| {
-        let tuple: *mut (Option<F>, C) = p_ctx.cast::<(Option<F>, C)>();
-        (*tuple).1(conflict_type, item)
-    }) {
-        action as c_int
-    } else {
-        ffi::SQLITE_CHANGESET_ABORT
+    unsafe {
+        if let Ok(action) = catch_unwind(|| {
+            let tuple: *mut (Option<F>, C) = p_ctx.cast::<(Option<F>, C)>();
+            (*tuple).1(conflict_type, item)
+        }) {
+            action as c_int
+        } else {
+            ffi::SQLITE_CHANGESET_ABORT
+        }
     }
 }
 
@@ -745,15 +741,17 @@ unsafe extern "C" fn x_input(p_in: *mut c_void, data: *mut c_void, len: *mut c_i
     if p_in.is_null() {
         return ffi::SQLITE_MISUSE;
     }
-    let bytes: &mut [u8] = from_raw_parts_mut(data as *mut u8, *len as usize);
-    let input = p_in as *mut &mut dyn Read;
-    match (*input).read(bytes) {
-        Ok(n) => {
-            *len = n as i32; // TODO Validate: n = 0 may not mean the reader will always no longer be able to
-                             // produce bytes.
-            ffi::SQLITE_OK
+    unsafe {
+        let bytes: &mut [u8] = from_raw_parts_mut(data as *mut u8, *len);
+        let input = p_in as *mut &mut dyn Read;
+        match (*input).read(bytes) {
+            Ok(n) => {
+                *len = n as i32; // TODO Validate: n = 0 may not mean the reader will always no longer be able to
+                // produce bytes.
+                ffi::SQLITE_OK
+            }
+            Err(_) => ffi::SQLITE_IOERR_READ, // TODO check if err is a (ru)sqlite Error => propagate
         }
-        Err(_) => ffi::SQLITE_IOERR_READ, // TODO check if err is a (ru)sqlite Error => propagate
     }
 }
 
@@ -761,19 +759,24 @@ unsafe extern "C" fn x_output(p_out: *mut c_void, data: *const c_void, len: c_in
     if p_out.is_null() {
         return ffi::SQLITE_MISUSE;
     }
-    // The sessions module never invokes an xOutput callback with the third
-    // parameter set to a value less than or equal to zero.
-    let bytes: &[u8] = from_raw_parts(data as *const u8, len as usize);
-    let output = p_out as *mut &mut dyn Write;
-    match (*output).write_all(bytes) {
-        Ok(_) => ffi::SQLITE_OK,
-        Err(_) => ffi::SQLITE_IOERR_WRITE, // TODO check if err is a (ru)sqlite Error => propagate
+    unsafe {
+        // The sessions module never invokes an xOutput callback with the third
+        // parameter set to a value less than or equal to zero.
+        let bytes: &[u8] = from_raw_parts(data as *const u8, len);
+        let output = p_out as *mut &mut dyn Write;
+        match (*output).write_all(bytes) {
+            Ok(_) => ffi::SQLITE_OK,
+            Err(_) => ffi::SQLITE_IOERR_WRITE, // TODO check if err is a (ru)sqlite Error => propagate
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
-    use fallible_streaming_iterator::FallibleStreamingIterator;
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use fallible_streaming_iterator::FallibleStreamingIterator as _;
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -788,7 +791,7 @@ mod test {
         let mut session = Session::new(&db)?;
         assert!(session.is_empty());
 
-        session.attach(None)?;
+        session.attach::<&str>(None)?;
         db.execute("INSERT INTO foo (t) VALUES (?1);", ["bar"])?;
 
         session.changeset()
@@ -802,7 +805,7 @@ mod test {
         db.execute_batch("INSERT INTO foo (t) VALUES ('bar');")?;
 
         let mut session = Session::new(&db)?;
-        session.attach(None)?;
+        session.attach::<&str>(None)?;
         db.execute("UPDATE foo SET i=100 WHERE t='bar';", [])?;
 
         session.changeset()
@@ -815,7 +818,7 @@ mod test {
         let mut session = Session::new(&db)?;
         assert!(session.is_empty());
 
-        session.attach(None)?;
+        session.attach::<&str>(None)?;
         db.execute("INSERT INTO foo (t) VALUES (?1);", ["bar"])?;
 
         let mut output = Vec::new();
@@ -939,7 +942,7 @@ mod test {
         let mut session = Session::new(&db)?;
         assert!(session.is_empty());
 
-        session.attach(None)?;
+        session.attach::<&str>(None)?;
         db.execute("INSERT INTO foo (t) VALUES (?1);", ["bar"])?;
 
         assert!(!session.is_empty());

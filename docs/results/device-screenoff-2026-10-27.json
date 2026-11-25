@@ -1,0 +1,32 @@
+{
+    "date":  "2026-10-27",
+    "device":  "motorola edge 50 neo",
+    "android":  "16",
+    "sdk":  36,
+    "package":  "dev.palmcode",
+    "build_type":  "debug",
+    "source_commit":  "b68ad0b",
+    "tool_command":  "sleep 300; echo done",
+    "timeout_ms":  600000,
+    "screen_off_wait_seconds":  330,
+    "result":  {
+                   "provider_restored":  true,
+                   "ui_done":  true,
+                   "spill_done":  true,
+                   "freeze_lines":  [
+
+                                    ],
+                   "log_start":  "10-27 20:31:29.000",
+                   "run_to_lock_ms":  19566,
+                   "main_visible":  true,
+                   "new_spills":  [
+                                      "files/spill/s1a17de0f40fc030/execspill-13375-2.log"
+                                  ],
+                   "restored_stayon":  "15",
+                   "restored_timeout":  "1800000",
+                   "provider_verified_after_restart":  true,
+                   "final_session_marker":  true,
+                   "final_mock_marker":  true,
+                   "original_workspace_active":  true
+               }
+}

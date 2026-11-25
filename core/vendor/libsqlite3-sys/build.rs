@@ -1,12 +1,44 @@
 use std::env;
 use std::path::Path;
 
+// Just to keep MSRV low
+#[cfg(any(
+    feature = "bundled",
+    feature = "bundled-windows",
+    feature = "bundled-sqlcipher",
+    feature = "buildtime_bindgen",
+))]
+macro_rules! cfg_select {
+    ({ $($tt:tt)* }) => {{
+        $crate::cfg_select! { $($tt)* }
+    }};
+    (_ => { $($output:tt)* }) => {
+        $($output)*
+    };
+    (
+        $cfg:meta => $output:tt
+        $($( $rest:tt )+)?
+    ) => {{
+        #[cfg($cfg)]
+        cfg_select! { _ => $output }
+        $(
+            #[cfg(not($cfg))]
+            cfg_select! { $($rest)+ }
+        )?
+    }}
+}
+
+#[cfg(all(feature = "loadable_extension", feature = "preupdate_hook"))]
+compile_error!(
+    "feature \"loadable_extension\" and feature \"preupdate_hook\" cannot be enabled at the same time"
+);
+
 /// Tells whether we're building for Windows. This is more suitable than a plain
 /// `cfg!(windows)`, since the latter does not properly handle cross-compilation
 ///
 /// Note that there is no way to know at compile-time which system we'll be
 /// targeting, and this test must be made at run-time (of the build script) See
-/// https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts
+/// <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts>
 fn win_target() -> bool {
     env::var("CARGO_CFG_WINDOWS").is_ok()
 }
@@ -15,7 +47,7 @@ fn win_target() -> bool {
 /// See [`win_target`]
 #[cfg(any(feature = "bundled", feature = "bundled-windows"))]
 fn android_target() -> bool {
-    env::var("CARGO_CFG_TARGET_OS").map_or(false, |v| v == "android")
+    env::var("CARGO_CFG_TARGET_OS").is_ok_and(|v| v == "android")
 }
 
 /// Tells whether a given compiler will be used `compiler_name` is compared to
@@ -23,7 +55,7 @@ fn android_target() -> bool {
 ///
 /// See [`win_target`]
 fn is_compiler(compiler_name: &str) -> bool {
-    env::var("CARGO_CFG_TARGET_ENV").map_or(false, |v| v == compiler_name)
+    env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|v| v == compiler_name)
 }
 
 /// Copy bindgen file from `dir` to `out_path`.
@@ -47,7 +79,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=LIBSQLITE3_SYS_USE_PKG_CONFIG");
-    if env::var_os("LIBSQLITE3_SYS_USE_PKG_CONFIG").map_or(false, |s| s != "0")
+    if env::var_os("LIBSQLITE3_SYS_USE_PKG_CONFIG").is_some_and(|s| s != "0")
         || cfg!(feature = "loadable_extension")
     {
         build_linked::main(&out_dir, &out_path);
@@ -101,24 +133,40 @@ mod build_bundled {
         let lib_name = super::lib_name();
 
         // This is just a sanity check, the top level `main` should ensure this.
-        assert!(!(cfg!(feature = "bundled-windows") && !cfg!(feature = "bundled") && !win_target()),
-            "This module should not be used: we're not on Windows and the bundled feature has not been enabled");
+        assert!(
+            !(cfg!(feature = "bundled-windows") && !cfg!(feature = "bundled") && !win_target()),
+            "This module should not be used: we're not on Windows and the bundled feature has not been enabled"
+        );
+        let (include_dir, source) = cfg_select! {
+            feature = "bundled-sqlcipher" => {
+                let dir = sqlcipher_src::source_dir();
+                (dir.to_owned(), dir.join(sqlcipher_src::SOURCE_FILE))
+            }
+            _ => {
+                let dir = format!("{}/{lib_name}", env!("CARGO_MANIFEST_DIR"));
+                let source = format!("{lib_name}/sqlite3.c");
+                (
+                    std::path::PathBuf::from(dir),
+                    std::path::PathBuf::from(source),
+                )
+            }
+        };
 
-        #[cfg(feature = "buildtime_bindgen")]
-        {
-            use super::{bindings, HeaderLocation};
-            let header = HeaderLocation::FromPath(lib_name.to_owned());
-            bindings::write_to_out_dir(header, out_path);
+        cfg_select! {
+            feature = "buildtime_bindgen" => {
+                use super::{HeaderLocation, bindings};
+                let header = HeaderLocation::FromPath(include_dir.to_string_lossy().into());
+                bindings::write_to_out_dir(header, out_path);
+            }
+            _ => {
+                super::copy_bindings(lib_name, "bindgen_bundled_version", out_path);
+            }
         }
-        #[cfg(not(feature = "buildtime_bindgen"))]
-        {
-            super::copy_bindings(lib_name, "bindgen_bundled_version", out_path);
-        }
-        println!("cargo:include={}/{lib_name}", env!("CARGO_MANIFEST_DIR"));
-        println!("cargo:rerun-if-changed={lib_name}/sqlite3.c");
+        println!("cargo:include={}", include_dir.display());
+        println!("cargo:rerun-if-changed={}", source.display());
         println!("cargo:rerun-if-changed=sqlite3/wasm32-wasi-vfs.c");
         let mut cfg = cc::Build::new();
-        cfg.file(format!("{lib_name}/sqlite3.c"))
+        cfg.file(&source)
             .flag("-DSQLITE_CORE")
             .flag("-DSQLITE_DEFAULT_FOREIGN_KEYS=1")
             .flag("-DSQLITE_ENABLE_API_ARMOR")
@@ -129,7 +177,6 @@ mod build_bundled {
             .flag("-DSQLITE_ENABLE_FTS5")
             .flag("-DSQLITE_ENABLE_JSON1")
             .flag("-DSQLITE_ENABLE_LOAD_EXTENSION=1")
-            .flag("-DSQLITE_ENABLE_MEMORY_MANAGEMENT")
             .flag("-DSQLITE_ENABLE_RTREE")
             .flag("-DSQLITE_ENABLE_STAT4")
             .flag("-DSQLITE_SOUNDEX")
@@ -141,7 +188,11 @@ mod build_bundled {
             .warnings(false);
 
         if cfg!(feature = "bundled-sqlcipher") {
-            cfg.flag("-DSQLITE_HAS_CODEC").flag("-DSQLITE_TEMP_STORE=2");
+            cfg.flag("-DSQLITE_HAS_CODEC")
+                .flag("-DSQLITE_TEMP_STORE=2")
+                .flag("-DSQLITE_EXTRA_INIT=sqlcipher_extra_init")
+                .flag("-DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
+                .flag("-DHAVE_STDINT_H=1");
 
             let target = env::var("TARGET").unwrap();
             let host = env::var("HOST").unwrap();
@@ -161,7 +212,9 @@ mod build_bundled {
                 (lib_dir, inc_dir) => match find_openssl_dir(&host, &target) {
                     None => {
                         if is_windows && !cfg!(feature = "bundled-sqlcipher-vendored-openssl") {
-                            panic!("Missing environment variable OPENSSL_DIR or OPENSSL_DIR is not set")
+                            panic!(
+                                "Missing environment variable OPENSSL_DIR or OPENSSL_DIR is not set"
+                            )
                         } else {
                             (vec![PathBuf::new()], PathBuf::new())
                         }
@@ -182,7 +235,7 @@ mod build_bundled {
                         let inc_dir = inc_dir.unwrap_or_else(|| openssl_dir.join("include"));
 
                         if !lib_dir.iter().all(|p| p.exists()) {
-                            panic!("OpenSSL library directory does not exist: {:?}", lib_dir);
+                            panic!("OpenSSL library directory does not exist: {lib_dir:?}");
                         }
 
                         if !Path::new(&inc_dir).exists() {
@@ -205,8 +258,8 @@ mod build_bundled {
             } else if use_openssl {
                 cfg.include(inc_dir.to_string_lossy().as_ref());
                 let lib_name = if is_windows { "libcrypto" } else { "crypto" };
-                println!("cargo:rustc-link-lib=dylib={}", lib_name);
-                for lib_dir_item in lib_dir.iter() {
+                println!("cargo:rustc-link-lib=dylib={lib_name}");
+                for lib_dir_item in &lib_dir {
                     println!("cargo:rustc-link-search={}", lib_dir_item.to_string_lossy());
                 }
             } else if is_apple {
@@ -232,14 +285,17 @@ mod build_bundled {
 
         // If explicitly requested: enable static linking against the Microsoft Visual
         // C++ Runtime to avoid dependencies on vcruntime140.dll and similar libraries.
-        if cfg!(target_feature = "crt-static") && is_compiler("msvc") {
+        if env::var("CARGO_CFG_TARGET_FEATURE")
+            .is_ok_and(|v| v.split(',').any(|tf| tf == "crt-static"))
+            && is_compiler("msvc")
+        {
             cfg.static_crt(true);
         }
 
         if !win_target() {
             cfg.flag("-DHAVE_LOCALTIME_R");
         }
-        if env::var("TARGET").map_or(false, |v| v == "wasm32-wasi") {
+        if env::var("TARGET").is_ok_and(|v| v.starts_with("wasm32-wasi")) {
             cfg.flag("-USQLITE_THREADSAFE")
                 .flag("-DSQLITE_THREADSAFE=0")
                 // https://github.com/rust-lang/rust/issues/74393
@@ -255,6 +311,9 @@ mod build_bundled {
         }
         if cfg!(feature = "unlock_notify") {
             cfg.flag("-DSQLITE_ENABLE_UNLOCK_NOTIFY");
+        }
+        if cfg!(feature = "column_metadata") {
+            cfg.flag("-DSQLITE_ENABLE_COLUMN_METADATA");
         }
         if cfg!(feature = "preupdate_hook") {
             cfg.flag("-DSQLITE_ENABLE_PREUPDATE_HOOK");
@@ -285,7 +344,7 @@ mod build_bundled {
                 } else if extra.starts_with("SQLITE_") {
                     cfg.flag(format!("-D{extra}"));
                 } else {
-                    panic!("Don't understand {} in LIBSQLITE3_FLAGS", extra);
+                    panic!("Don't understand {extra} in LIBSQLITE3_FLAGS");
                 }
             }
         }
@@ -299,6 +358,8 @@ mod build_bundled {
     fn env(name: &str) -> Option<OsString> {
         let prefix = env::var("TARGET").unwrap().to_uppercase().replace('-', "_");
         let prefixed = format!("{prefix}_{name}");
+        println!("cargo:rerun-if-env-changed={prefixed}");
+        println!("cargo:rerun-if-env-changed={name}");
         let var = env::var_os(prefixed);
 
         match var {
@@ -336,7 +397,7 @@ pub enum HeaderLocation {
 }
 
 impl From<HeaderLocation> for String {
-    fn from(header: HeaderLocation) -> String {
+    fn from(header: HeaderLocation) -> Self {
         match header {
             HeaderLocation::FromEnvironment => {
                 let prefix = env_prefix();
@@ -373,7 +434,7 @@ mod build_linked {
     #[cfg(feature = "vcpkg")]
     extern crate vcpkg;
 
-    use super::{bindings, env_prefix, is_compiler, lib_name, win_target, HeaderLocation};
+    use super::{HeaderLocation, bindings, env_prefix, is_compiler, lib_name, win_target};
     use std::env;
     use std::path::Path;
 
@@ -428,9 +489,13 @@ mod build_linked {
         if let Ok(dir) = env::var(format!("{}_LIB_DIR", env_prefix())) {
             // Try to use pkg-config to determine link commands
             let pkgconfig_path = Path::new(&dir).join("pkgconfig");
-            env::set_var("PKG_CONFIG_PATH", pkgconfig_path);
+            unsafe { env::set_var("PKG_CONFIG_PATH", pkgconfig_path) };
             #[cfg(not(feature = "loadable_extension"))]
-            if pkg_config::Config::new().probe(link_lib).is_err() {
+            if pkg_config::Config::new()
+                .atleast_version("3.45.3")
+                .probe(link_lib)
+                .is_err()
+            {
                 // Otherwise just emit the bare minimum link commands.
                 println!("cargo:rustc-link-lib={}={link_lib}", find_link_mode());
                 println!("cargo:rustc-link-search={dir}");
@@ -444,6 +509,7 @@ mod build_linked {
 
         // See if pkg-config can do everything for us.
         if let Ok(mut lib) = pkg_config::Config::new()
+            .atleast_version("3.45.3")
             .print_system_libs(false)
             .probe(link_lib)
         {
@@ -466,10 +532,10 @@ mod build_linked {
     fn try_vcpkg() -> Option<HeaderLocation> {
         if cfg!(feature = "vcpkg") && is_compiler("msvc") {
             // See if vcpkg can find it.
-            if let Ok(mut lib) = vcpkg::Config::new().probe(lib_name()) {
-                if let Some(header) = lib.include_paths.pop() {
-                    return Some(HeaderLocation::FromPath(header.to_string_lossy().into()));
-                }
+            if let Ok(mut lib) = vcpkg::Config::new().probe(lib_name())
+                && let Some(header) = lib.include_paths.pop()
+            {
+                return Some(HeaderLocation::FromPath(header.to_string_lossy().into()));
             }
             None
         } else {
@@ -485,7 +551,7 @@ mod bindings {
 
     use std::path::Path;
 
-    static PREBUILT_BINDGENS: &[&str] = &["bindgen_3.14.0"];
+    static PREBUILT_BINDGENS: &[&str] = &["bindgen_3.45.3"];
 
     pub fn write_to_out_dir(_header: HeaderLocation, out_path: &Path) {
         let name = PREBUILT_BINDGENS[PREBUILT_BINDGENS.len() - 1];
@@ -507,6 +573,7 @@ mod bindings {
             if name == "SQLITE_SERIALIZE_NOCOPY"
                 || name.starts_with("SQLITE_DESERIALIZE_")
                 || name.starts_with("SQLITE_PREPARE_")
+                || name.starts_with("SQLITE_TRACE_")
             {
                 Some(IntKind::UInt)
             } else {
@@ -532,6 +599,9 @@ mod bindings {
         let mut bindings = bindgen::builder()
             .default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
             .disable_nested_struct_naming()
+            .generate_comments(false)
+            .generate_cstr(true)
+            .use_core()
             .trust_clang_mangling(false)
             .header(header.clone())
             .parse_callbacks(Box::new(SqliteTypeChooser));
@@ -541,30 +611,30 @@ mod bindings {
             bindings = bindings
                 .blocklist_function("sqlite3_auto_extension")
                 .raw_line(
-                    r#"extern "C" {
+                    r#"unsafe extern "C" {
     pub fn sqlite3_auto_extension(
-        xEntryPoint: ::std::option::Option<
+        xEntryPoint: ::core::option::Option<
             unsafe extern "C" fn(
                 db: *mut sqlite3,
-                pzErrMsg: *mut *mut ::std::os::raw::c_char,
+                pzErrMsg: *mut *mut ::core::ffi::c_char,
                 _: *const sqlite3_api_routines,
-            ) -> ::std::os::raw::c_int,
+            ) -> ::core::ffi::c_int,
         >,
-    ) -> ::std::os::raw::c_int;
+    ) -> ::core::ffi::c_int;
 }"#,
                 )
                 .blocklist_function("sqlite3_cancel_auto_extension")
                 .raw_line(
-                    r#"extern "C" {
+                    r#"unsafe extern "C" {
     pub fn sqlite3_cancel_auto_extension(
-        xEntryPoint: ::std::option::Option<
+        xEntryPoint: ::core::option::Option<
             unsafe extern "C" fn(
                 db: *mut sqlite3,
-                pzErrMsg: *mut *mut ::std::os::raw::c_char,
+                pzErrMsg: *mut *mut ::core::ffi::c_char,
                 _: *const sqlite3_api_routines,
-            ) -> ::std::os::raw::c_int,
+            ) -> ::core::ffi::c_int,
         >,
-    ) -> ::std::os::raw::c_int;
+    ) -> ::core::ffi::c_int;
 }"#,
                 )
                 .blocklist_function(".*16.*")
@@ -617,23 +687,25 @@ mod bindings {
         let bindings = bindings
             .layout_tests(false)
             .generate()
-            .unwrap_or_else(|_| panic!("could not run bindgen on header {}", header));
+            .unwrap_or_else(|_| panic!("could not run bindgen on header {header}"));
 
-        #[cfg(feature = "loadable_extension")]
-        {
-            let mut output = Vec::new();
-            bindings
-                .write(Box::new(&mut output))
-                .expect("could not write output of bindgen");
-            let mut output = String::from_utf8(output).expect("bindgen output was not UTF-8?!");
-            super::loadable_extension::generate_functions(&mut output);
-            std::fs::write(out_path, output.as_bytes())
-                .unwrap_or_else(|_| panic!("Could not write to {:?}", out_path));
+        cfg_select! {
+            feature = "loadable_extension" => {
+                let mut output = Vec::new();
+                bindings
+                    .write(Box::new(&mut output))
+                    .expect("could not write output of bindgen");
+                let mut output = String::from_utf8(output).expect("bindgen output was not UTF-8?!");
+                super::loadable_extension::generate_functions(&mut output);
+                std::fs::write(out_path, output.as_bytes())
+                    .unwrap_or_else(|_| panic!("Could not write to {out_path:?}"));
+            }
+            _ => {
+                bindings
+                    .write_to_file(out_path)
+                    .unwrap_or_else(|_| panic!("Could not write to {out_path:?}"));
+            }
         }
-        #[cfg(not(feature = "loadable_extension"))]
-        bindings
-            .write_to_file(out_path)
-            .unwrap_or_else(|_| panic!("Could not write to {:?}", out_path));
     }
 }
 
@@ -712,32 +784,38 @@ mod loadable_extension {
             let ty = &method.output;
             let tokens = if "db_config" == name {
                 quote::quote! {
-                    static #ptr_name: ::std::sync::atomic::AtomicPtr<()> = ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
-                    pub unsafe fn #sqlite3_fn_name(#args arg3: ::std::os::raw::c_int, arg4: *mut ::std::os::raw::c_int) #ty {
-                        let ptr = #ptr_name.load(::std::sync::atomic::Ordering::Acquire);
-                        assert!(!ptr.is_null(), "SQLite API not initialized");
-                        let fun: unsafe extern "C" fn(#args #varargs) #ty = ::std::mem::transmute(ptr);
-                        (fun)(#arg_names, arg3, arg4)
+                    static #ptr_name: ::core::sync::atomic::AtomicPtr<()> = ::core::sync::atomic::AtomicPtr::new(::core::ptr::null_mut());
+                    pub unsafe fn #sqlite3_fn_name(#args arg3: ::core::ffi::c_int, arg4: *mut ::core::ffi::c_int) #ty {
+                        unsafe {
+                            let ptr = #ptr_name.load(::core::sync::atomic::Ordering::Acquire);
+                            assert!(!ptr.is_null(), "SQLite API not initialized");
+                            let fun: unsafe extern "C" fn(#args #varargs) #ty = ::core::mem::transmute(ptr);
+                            (fun)(#arg_names, arg3, arg4)
+                        }
                     }
                 }
             } else if "log" == name {
                 quote::quote! {
-                    static #ptr_name: ::std::sync::atomic::AtomicPtr<()> = ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
-                    pub unsafe fn #sqlite3_fn_name(#args arg3: *const ::std::os::raw::c_char) #ty {
-                        let ptr = #ptr_name.load(::std::sync::atomic::Ordering::Acquire);
-                        assert!(!ptr.is_null(), "SQLite API not initialized");
-                        let fun: unsafe extern "C" fn(#args #varargs) #ty = ::std::mem::transmute(ptr);
-                        (fun)(#arg_names, arg3)
+                    static #ptr_name: ::core::sync::atomic::AtomicPtr<()> = ::core::sync::atomic::AtomicPtr::new(::core::ptr::null_mut());
+                    pub unsafe fn #sqlite3_fn_name(#args arg3: *const ::core::ffi::c_char) #ty {
+                        unsafe {
+                            let ptr = #ptr_name.load(::core::sync::atomic::Ordering::Acquire);
+                            assert!(!ptr.is_null(), "SQLite API not initialized");
+                            let fun: unsafe extern "C" fn(#args #varargs) #ty = ::core::mem::transmute(ptr);
+                            (fun)(#arg_names, arg3)
+                        }
                     }
                 }
             } else {
                 quote::quote! {
-                    static #ptr_name: ::std::sync::atomic::AtomicPtr<()> = ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+                    static #ptr_name: ::core::sync::atomic::AtomicPtr<()> = ::core::sync::atomic::AtomicPtr::new(::core::ptr::null_mut());
                     pub unsafe fn #sqlite3_fn_name(#args) #ty {
-                        let ptr = #ptr_name.load(::std::sync::atomic::Ordering::Acquire);
-                        assert!(!ptr.is_null(), "SQLite API not initialized or SQLite feature omitted");
-                        let fun: unsafe extern "C" fn(#args #varargs) #ty = ::std::mem::transmute(ptr);
-                        (fun)(#arg_names)
+                        unsafe {
+                            let ptr = #ptr_name.load(::core::sync::atomic::Ordering::Acquire);
+                            assert!(!ptr.is_null(), "SQLite API not initialized or SQLite feature omitted");
+                            let fun: unsafe extern "C" fn(#args #varargs) #ty = ::core::mem::transmute(ptr);
+                            (fun)(#arg_names)
+                        }
                     }
                 }
             };
@@ -754,7 +832,7 @@ mod loadable_extension {
                 if let Some(fun) = (*#p_api).#ident {
                     #ptr_name.store(
                         fun as usize as *mut (),
-                        ::std::sync::atomic::Ordering::Release,
+                        ::core::sync::atomic::Ordering::Release,
                     );
                 }
             });
@@ -762,18 +840,20 @@ mod loadable_extension {
         // (3) generate rust code similar to SQLITE_EXTENSION_INIT2 macro
         let tokens = quote::quote! {
             /// Like SQLITE_EXTENSION_INIT2 macro
-            pub unsafe fn rusqlite_extension_init2(#p_api: *mut #sqlite3_api_routines_ident) -> ::std::result::Result<(),crate::InitError> {
-                #(#malloc)* // sqlite3_malloc needed by to_sqlite_error
-                if let Some(fun) = (*#p_api).libversion_number {
-                    let version = fun();
-                    if SQLITE_VERSION_NUMBER > version {
-                        return Err(crate::InitError::VersionMismatch{compile_time: SQLITE_VERSION_NUMBER, runtime: version});
+            pub unsafe fn rusqlite_extension_init2(#p_api: *mut #sqlite3_api_routines_ident) -> ::core::result::Result<(), crate::InitError> {
+                unsafe {
+                    #(#malloc)* // sqlite3_malloc needed by to_sqlite_error
+                    if let Some(fun) = (*#p_api).libversion_number {
+                        let version = fun();
+                        if SQLITE_VERSION_NUMBER > version {
+                            return Err(crate::InitError::VersionMismatch{compile_time: SQLITE_VERSION_NUMBER, runtime: version});
+                        }
+                    } else {
+                        return Err(crate::InitError::NullFunctionPointer);
                     }
-                } else {
-                    return Err(crate::InitError::NullFunctionPointer);
+                    #(#stores)*
+                    Ok(())
                 }
-                #(#stores)*
-                Ok(())
             }
         };
         output.push_str(&prettyplease::unparse(
@@ -782,7 +862,7 @@ mod loadable_extension {
         output.push('\n');
     }
 
-    fn extract_method(ty: &syn::Type) -> Option<&syn::TypeBareFn> {
+    fn extract_method(ty: &syn::Type) -> Option<&syn::TypeFnPtr> {
         match ty {
             syn::Type::Path(tp) => tp.path.segments.last(),
             _ => None,
@@ -796,7 +876,7 @@ mod loadable_extension {
             _ => None,
         })?
         .map(|ty| match ty {
-            syn::Type::BareFn(r) => Some(r),
+            syn::Type::FnPtr(r) => Some(r),
             _ => None,
         })?
     }

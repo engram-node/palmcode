@@ -1,17 +1,16 @@
+use std::ffi::{c_char, c_int, c_void};
 use std::fmt::Debug;
-use std::os::raw::{c_char, c_int, c_void};
 use std::panic::catch_unwind;
 use std::ptr;
 
-use super::expect_utf8;
-use super::free_boxed_hook;
 use super::Action;
+use super::expect_utf8;
+use crate::Connection;
+use crate::Result;
 use crate::error::check;
 use crate::ffi;
 use crate::inner_connection::InnerConnection;
 use crate::types::ValueRef;
-use crate::Connection;
-use crate::Result;
 
 /// The possible cases for when a PreUpdateHook gets triggered. Allows access to the relevant
 /// functions for each case through the contained values.
@@ -72,7 +71,7 @@ impl PreUpdateOldValueAccessor {
     }
 
     /// Get the value of the row being updated/deleted at the specified index.
-    pub fn get_old_column_value(&self, i: i32) -> Result<ValueRef> {
+    pub fn get_old_column_value(&self, i: i32) -> Result<ValueRef<'_>> {
         let mut p_value: *mut ffi::sqlite3_value = ptr::null_mut();
         unsafe {
             check(ffi::sqlite3_preupdate_old(self.db, i, &mut p_value))?;
@@ -110,7 +109,7 @@ impl PreUpdateNewValueAccessor {
     }
 
     /// Get the value of the row being updated/deleted at the specified index.
-    pub fn get_new_column_value(&self, i: i32) -> Result<ValueRef> {
+    pub fn get_new_column_value(&self, i: i32) -> Result<ValueRef<'_>> {
         let mut p_value: *mut ffi::sqlite3_value = ptr::null_mut();
         unsafe {
             check(ffi::sqlite3_preupdate_new(self.db, i, &mut p_value))?;
@@ -130,20 +129,16 @@ impl Connection {
     /// - a variant of the PreUpdateCase enum which allows access to extra functions depending
     ///   on whether it's an update, delete or insert.
     #[inline]
-    pub fn preupdate_hook<F>(&self, hook: Option<F>)
+    pub fn preupdate_hook<F>(&mut self, hook: Option<F>) -> Result<()>
     where
         F: FnMut(Action, &str, &str, &PreUpdateCase) + Send + 'static,
     {
-        self.db.borrow_mut().preupdate_hook(hook);
+        self.db.borrow_mut().preupdate_hook(hook)?;
+        Ok(())
     }
 }
 
 impl InnerConnection {
-    #[inline]
-    pub fn remove_preupdate_hook(&mut self) {
-        self.preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>);
-    }
-
     /// ```compile_fail
     /// use rusqlite::{Connection, Result, hooks::PreUpdateCase};
     /// fn main() -> Result<()> {
@@ -157,7 +152,7 @@ impl InnerConnection {
     ///     db.execute_batch("CREATE TABLE foo AS SELECT 1 AS bar;")
     /// }
     /// ```
-    fn preupdate_hook<F>(&mut self, hook: Option<F>)
+    fn preupdate_hook<F>(&mut self, hook: Option<F>) -> Result<()>
     where
         F: FnMut(Action, &str, &str, &PreUpdateCase) + Send + 'static,
     {
@@ -195,48 +190,33 @@ impl InnerConnection {
                 },
                 Action::UNKNOWN => PreUpdateCase::Unknown,
             };
-
-            drop(catch_unwind(|| {
-                let boxed_hook: *mut F = p_arg.cast::<F>();
-                (*boxed_hook)(
-                    action,
-                    expect_utf8(db_name, "database name"),
-                    expect_utf8(tbl_name, "table name"),
-                    &preupdate_case,
-                );
-            }));
-        }
-
-        let free_preupdate_hook = if hook.is_some() {
-            Some(free_boxed_hook::<F> as unsafe fn(*mut c_void))
-        } else {
-            None
-        };
-
-        let previous_hook = match hook {
-            Some(hook) => {
-                let boxed_hook: *mut F = Box::into_raw(Box::new(hook));
-                unsafe {
-                    ffi::sqlite3_preupdate_hook(
-                        self.db(),
-                        Some(call_boxed_closure::<F>),
-                        boxed_hook.cast(),
-                    )
-                }
-            }
-            _ => unsafe { ffi::sqlite3_preupdate_hook(self.db(), None, ptr::null_mut()) },
-        };
-        if !previous_hook.is_null() {
-            if let Some(free_boxed_hook) = self.free_preupdate_hook {
-                unsafe { free_boxed_hook(previous_hook) };
+            unsafe {
+                drop(catch_unwind(|| {
+                    let boxed_hook: *mut F = p_arg.cast::<F>();
+                    (*boxed_hook)(
+                        action,
+                        expect_utf8(db_name, "database name"),
+                        expect_utf8(tbl_name, "table name"),
+                        &preupdate_case,
+                    );
+                }));
             }
         }
-        self.free_preupdate_hook = free_preupdate_hook;
+
+        let x_pre_update = hook.as_ref().map(|_| call_boxed_closure::<F> as _);
+        self.set_clientdata(c"sqlite3_preupdate_hook", hook, |db, bh| unsafe {
+            ffi::sqlite3_preupdate_hook(db, x_pre_update, bh);
+            ffi::SQLITE_OK
+        })?;
+        Ok(())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::super::Action;
@@ -245,7 +225,7 @@ mod test {
 
     #[test]
     fn test_preupdate_hook_insert() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let mut db = Connection::open_in_memory()?;
 
         static CALLED: AtomicBool = AtomicBool::new(false);
 
@@ -269,7 +249,7 @@ mod test {
                 _ => panic!("wrong preupdate case"),
             }
             CALLED.store(true, Ordering::Relaxed);
-        }));
+        }))?;
         db.execute_batch("CREATE TABLE foo (t TEXT)")?;
         db.execute_batch("INSERT INTO foo VALUES ('lisa')")?;
         assert!(CALLED.load(Ordering::Relaxed));
@@ -278,7 +258,7 @@ mod test {
 
     #[test]
     fn test_preupdate_hook_delete() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let mut db = Connection::open_in_memory()?;
 
         static CALLED: AtomicBool = AtomicBool::new(false);
 
@@ -305,7 +285,7 @@ mod test {
                 _ => panic!("wrong preupdate case"),
             }
             CALLED.store(true, Ordering::Relaxed);
-        }));
+        }))?;
 
         db.execute_batch("DELETE from foo")?;
         assert!(CALLED.load(Ordering::Relaxed));
@@ -314,7 +294,7 @@ mod test {
 
     #[test]
     fn test_preupdate_hook_update() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let mut db = Connection::open_in_memory()?;
 
         static CALLED: AtomicBool = AtomicBool::new(false);
 
@@ -363,7 +343,7 @@ mod test {
                 _ => panic!("wrong preupdate case"),
             }
             CALLED.store(true, Ordering::Relaxed);
-        }));
+        }))?;
 
         db.execute_batch("UPDATE foo SET t = 'janice'")?;
         assert!(CALLED.load(Ordering::Relaxed));

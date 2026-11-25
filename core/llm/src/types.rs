@@ -7,6 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Opaque provider continuation state. Echo unchanged; never display or log it.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolMetadata(pub serde_json::Value);
+
+impl std::fmt::Debug for ToolMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[provider metadata]")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -22,6 +33,8 @@ pub struct ToolCallSpec {
     pub name: String,
     /// Raw JSON arguments text exactly as streamed by the server.
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<ToolMetadata>,
 }
 
 /// A message as sent to / received from the API. `reasoning` is captured
@@ -44,6 +57,8 @@ pub struct ApiToolCall {
     #[serde(rename = "type")]
     pub kind: &'static str, // always "function"
     pub function: ApiFunctionCall,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<ToolMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +101,7 @@ impl Message {
                 .map(|c| ApiToolCall {
                     id: c.id,
                     kind: "function",
+                    extra_content: c.extra_content,
                     function: ApiFunctionCall {
                         name: c.name,
                         arguments: c.arguments,
@@ -127,6 +143,7 @@ pub struct ToolCallDelta {
     pub id: Option<String>,
     pub name: Option<String>,
     pub arguments: Option<String>,
+    pub extra_content: Option<ToolMetadata>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,6 +157,8 @@ pub struct Usage {
 #[derive(Debug, Clone, Default)]
 pub struct Chunk {
     pub text: Option<String>,
+    /// Some compatible endpoints send a complete message inside the SSE stream.
+    pub full_message: bool,
     pub reasoning: Option<(ReasoningField, String)>,
     pub tool_deltas: Vec<ToolCallDelta>,
     pub finish_reason: Option<String>,
@@ -186,16 +205,30 @@ pub fn parse_chunk(payload: &str) -> Result<Option<Chunk>, crate::error::LlmErro
         });
     }
 
-    let delta = v
+    let choice = v
         .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("delta"));
+        .and_then(|c| c.first());
+    let delta = choice.and_then(|c| c.get("delta")).filter(|d| !d.is_null());
+    let message = choice
+        .and_then(|c| c.get("message"))
+        .filter(|m| !m.is_null());
+    let delta_has_payload = delta.is_some_and(|d| {
+        ["content", "reasoning_content", "reasoning", "tool_calls"]
+            .iter()
+            .any(|key| d.get(key).is_some_and(|v| !v.is_null()))
+    });
+    let delta = if !delta_has_payload && message.is_some() {
+        chunk.full_message = true;
+        message
+    } else {
+        delta
+    };
     if let Some(delta) = delta {
-        if let Some(t) = delta.get("content").and_then(|c| c.as_str())
+        if let Some(t) = delta.get("content").and_then(content_text)
             && !t.is_empty()
         {
-            chunk.text = Some(t.to_string());
+            chunk.text = Some(t);
         }
         // Reasoning: `reasoning_content` (majority) or bare `reasoning`.
         for (key, field) in [
@@ -212,6 +245,11 @@ pub fn parse_chunk(payload: &str) -> Result<Option<Chunk>, crate::error::LlmErro
         if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
             for call in calls {
                 chunk.tool_deltas.push(ToolCallDelta {
+                    extra_content: call
+                        .get("extra_content")
+                        .filter(|v| !v.is_null())
+                        .cloned()
+                        .map(ToolMetadata),
                     index: call.get("index").and_then(|i| i.as_u64()).map(|i| i as u32),
                     id: call.get("id").and_then(|i| i.as_str()).map(String::from),
                     name: call
@@ -239,6 +277,48 @@ pub fn parse_chunk(payload: &str) -> Result<Option<Chunk>, crate::error::LlmErro
     }
 
     Ok(Some(chunk))
+}
+
+fn content_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    let parts = value.as_array()?;
+    let mut text = String::new();
+    for part in parts {
+        if part.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(value) = part.get("text").and_then(|v| v.as_str())
+        {
+            text.push_str(value);
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod response_shape_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_metadata_is_parsed_and_redacted_from_debug() {
+        let chunk = parse_chunk(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{}"},"extra_content":{"google":{"thought_signature":"fixture-signature"}}}]}}]}"#).unwrap().unwrap();
+        assert!(chunk.tool_deltas[0].extra_content.is_some());
+        assert!(!format!("{chunk:?}").contains("fixture-signature"));
+    }
+
+    #[test]
+    fn full_message_in_sse_keeps_response_text() {
+        let chunk = parse_chunk(r#"{"choices":[{"message":{"role":"assistant","content":"Hello there"},"finish_reason":"stop"}]}"#).unwrap().unwrap();
+        assert_eq!(chunk.text.as_deref(), Some("Hello there"));
+        assert!(chunk.full_message);
+    }
+
+    #[test]
+    fn text_parts_are_combined_without_treating_images_as_text() {
+        let chunk = parse_chunk(r#"{"choices":[{"delta":{"content":[{"type":"text","text":"Hello "},{"type":"image_url","image_url":{"url":"ignored"}},{"type":"text","text":"there"}]}}]}"#).unwrap().unwrap();
+        assert_eq!(chunk.text.as_deref(), Some("Hello there"));
+        assert!(!chunk.full_message);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +360,7 @@ mod tests {
                 Message::assistant("hi there"),
                 Message::assistant_tool_calls(
                     vec![ToolCallSpec {
+                        extra_content: None,
                         id: "c1".into(),
                         name: "read".into(),
                         arguments: "{\"path\":\"/a\"}".into(),

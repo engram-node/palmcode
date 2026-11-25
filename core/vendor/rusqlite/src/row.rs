@@ -5,7 +5,7 @@ use std::convert;
 use super::{Error, Result, Statement};
 use crate::types::{FromSql, FromSqlError, ValueRef};
 
-/// A handle for the resulting rows of a query.
+/// A handle (lazy fallible streaming iterator) for the resulting rows of a query.
 #[must_use = "Rows is lazy and will do nothing unless consumed"]
 pub struct Rows<'stmt> {
     pub(crate) stmt: Option<&'stmt Statement<'stmt>>,
@@ -34,7 +34,7 @@ impl<'stmt> Rows<'stmt> {
     /// consider using [`query_map`](Statement::query_map) or
     /// [`query_and_then`](Statement::query_and_then) instead, which
     /// return types that implement `Iterator`.
-    #[allow(clippy::should_implement_trait)] // cannot implement Iterator
+    #[expect(clippy::should_implement_trait)] // cannot implement Iterator
     #[inline]
     pub fn next(&mut self) -> Result<Option<&Row<'stmt>>> {
         self.advance()?;
@@ -90,7 +90,7 @@ impl<'stmt> Rows<'stmt> {
 
 impl<'stmt> Rows<'stmt> {
     #[inline]
-    pub(crate) fn new(stmt: &'stmt Statement<'stmt>) -> Rows<'stmt> {
+    pub(crate) fn new(stmt: &'stmt Statement<'stmt>) -> Self {
         Rows {
             stmt: Some(stmt),
             row: None,
@@ -107,7 +107,7 @@ impl<'stmt> Rows<'stmt> {
 }
 
 impl Drop for Rows<'_> {
-    #[allow(unused_must_use)]
+    #[expect(unused_must_use)]
     #[inline]
     fn drop(&mut self) {
         self.reset();
@@ -247,7 +247,7 @@ pub struct Row<'stmt> {
     pub(crate) stmt: &'stmt Statement<'stmt>,
 }
 
-impl<'stmt> Row<'stmt> {
+impl Row<'_> {
     /// Get the value of a particular column of the result row.
     ///
     /// # Panics
@@ -292,6 +292,7 @@ impl<'stmt> Row<'stmt> {
                 value.data_type(),
             ),
             FromSqlError::OutOfRange(i) => Error::IntegralValueOutOfRange(idx, i),
+            FromSqlError::Utf8Error(err) => Error::Utf8Error(idx, err),
             FromSqlError::Other(err) => {
                 Error::FromSqlConversionFailure(idx, value.data_type(), err)
             }
@@ -344,6 +345,29 @@ impl<'stmt> Row<'stmt> {
     pub fn get_ref_unwrap<I: RowIndex>(&self, idx: I) -> ValueRef<'_> {
         self.get_ref(idx).unwrap()
     }
+
+    /// Return raw pointer at `idx`
+    /// # Safety
+    /// This function is unsafe because it uses raw pointer and cast
+    #[cfg(feature = "pointer")]
+    pub unsafe fn get_pointer<I: RowIndex, T: 'static>(
+        &self,
+        idx: I,
+        ptr_type: &'static std::ffi::CStr,
+    ) -> Result<Option<&T>> {
+        let idx = idx.idx(self.stmt)?;
+        debug_assert_eq!(self.stmt.stmt.column_type(idx), super::ffi::SQLITE_NULL);
+        unsafe {
+            let sv = super::ffi::sqlite3_column_value(self.stmt.stmt.ptr(), idx as std::ffi::c_int);
+            Ok(if sv.is_null() {
+                None
+            } else {
+                super::ffi::sqlite3_value_pointer(sv, ptr_type.as_ptr())
+                    .cast::<T>()
+                    .as_ref()
+            })
+        }
+    }
 }
 
 impl<'stmt> AsRef<Statement<'stmt>> for Row<'stmt> {
@@ -355,7 +379,7 @@ impl<'stmt> AsRef<Statement<'stmt>> for Row<'stmt> {
 /// Debug `Row` like an ordered `Map<Result<&str>, Result<(Type, ValueRef)>>`
 /// with column name as key except that for `Type::Blob` only its size is
 /// printed (not its content).
-impl<'stmt> std::fmt::Debug for Row<'stmt> {
+impl std::fmt::Debug for Row<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dm = f.debug_map();
         for c in 0..self.stmt.column_count() {
@@ -393,7 +417,7 @@ impl<'stmt> std::fmt::Debug for Row<'stmt> {
 }
 
 mod sealed {
-    /// This trait exists just to ensure that the only impls of `trait Params`
+    /// This trait exists just to ensure that the only impls of `trait RowIndex`
     /// that are allowed are ones in this crate.
     pub trait Sealed {}
     impl Sealed for usize {}
@@ -403,8 +427,8 @@ mod sealed {
 /// A trait implemented by types that can index into columns of a row.
 ///
 /// It is only implemented for `usize` and `&str`.
-pub trait RowIndex: sealed::Sealed {
-    /// Returns the index of the appropriate column, or `None` if no such
+pub trait RowIndex: sealed::Sealed + Copy {
+    /// Returns the index of the appropriate column, or `Error` if no such
     /// column exists.
     fn idx(&self, stmt: &Statement<'_>) -> Result<usize>;
 }
@@ -438,7 +462,7 @@ macro_rules! tuple_try_from_row {
             fn try_from(row: &'a Row<'a>) -> Result<Self> {
                 let mut index = 0;
                 $(
-                    #[allow(non_snake_case)]
+                    #[expect(non_snake_case)]
                     let $field = row.get::<_, $field>(index)?;
                     index += 1;
                 )*
@@ -461,14 +485,17 @@ macro_rules! tuples_try_from_row {
 
 tuples_try_from_row!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use crate::{Connection, Result};
 
     #[test]
     fn test_try_from_row_for_tuple_1() -> Result<()> {
         use crate::ToSql;
-        use std::convert::TryFrom;
+        use std::convert::TryFrom as _;
 
         let conn = Connection::open_in_memory()?;
         conn.execute(
@@ -485,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_try_from_row_for_tuple_2() -> Result<()> {
-        use std::convert::TryFrom;
+        use std::convert::TryFrom as _;
 
         let conn = Connection::open_in_memory()?;
         conn.execute("CREATE TABLE test (a INTEGER, b INTEGER)", [])?;
@@ -503,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_try_from_row_for_tuple_16() -> Result<()> {
-        use std::convert::TryFrom;
+        use std::convert::TryFrom as _;
 
         let create_table = "CREATE TABLE test (
             a INTEGER,
@@ -600,14 +627,14 @@ mod tests {
         {
             let iterator_count = stmt.query_map([], |_| Ok(()))?.count();
             assert_eq!(1, iterator_count); // should be 0
-            use fallible_streaming_iterator::FallibleStreamingIterator;
+            use fallible_streaming_iterator::FallibleStreamingIterator as _;
             let fallible_iterator_count = stmt.query([])?.count().unwrap_or(0);
             assert_eq!(0, fallible_iterator_count);
         }
         {
             let iterator_last = stmt.query_map([], |_| Ok(()))?.last();
             assert!(iterator_last.is_some()); // should be none
-            use fallible_iterator::FallibleIterator;
+            use fallible_iterator::FallibleIterator as _;
             let fallible_iterator_last = stmt.query([])?.map(|_| Ok(())).last();
             assert!(fallible_iterator_last.is_err());
         }
@@ -631,11 +658,25 @@ mod tests {
         )?;
         let mut rows = stmt.query([])?;
         let row = rows.next()?.unwrap();
-        let s = format!("{:?}", row);
+        let s = format!("{row:?}");
         assert_eq!(
             s,
             r#"{"name": (Text, "Lisa"), "id": (Integer, 1), "pi": (Real, 3.14), "blob": (Blob, 6), "void": (Null, ())}"#
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "pointer")]
+    fn test_pointer() -> Result<()> {
+        use crate::ffi::fts5_api;
+        use crate::types::ToSqlOutput;
+        const PTR_TYPE: &std::ffi::CStr = c"fts5_api_ptr";
+        let p_ret: *mut fts5_api = std::ptr::null_mut();
+        let ptr = ToSqlOutput::Pointer((&p_ret as *const *mut fts5_api as _, PTR_TYPE, None));
+        let db = Connection::open_in_memory()?;
+        db.query_row("SELECT fts5(?)", [ptr], |_| Ok(()))?;
+        assert!(!p_ret.is_null());
         Ok(())
     }
 }

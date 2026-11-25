@@ -1,5 +1,10 @@
 package dev.palmcode.app.ui
 
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -7,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
@@ -17,8 +23,11 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,13 +36,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.palmcode.app.CoreManager
+import dev.palmcode.app.ThemeMode
+import dev.palmcode.app.ProviderSettings
 import dev.palmcode.core.ProbeReportRecord
 import dev.palmcode.core.providerProbe
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -42,6 +55,7 @@ import kotlinx.coroutines.withContext
 fun SetupScreen(onSaved: () -> Unit) {
     val store = CoreManager.store
     val scope = rememberCoroutineScope()
+    BackHandler(enabled = store.configured, onBack = onSaved)
 
     var baseUrl by remember { mutableStateOf(store.baseUrl) }
     var apiKey by remember { mutableStateOf("") }
@@ -49,6 +63,10 @@ fun SetupScreen(onSaved: () -> Unit) {
     var fastModel by remember { mutableStateOf(store.fastModel) }
 
     var probing by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var saveMessage by remember { mutableStateOf<String?>(null) }
+    var testingUserland by remember { mutableStateOf(false) }
+    var diagnostics by remember { mutableStateOf("Self-test has not run") }
     var probe by remember { mutableStateOf<ProbeReportRecord?>(null) }
     var probeError by remember { mutableStateOf<String?>(null) }
     var advanced by remember { mutableStateOf(false) }
@@ -62,6 +80,25 @@ fun SetupScreen(onSaved: () -> Unit) {
     var firstTokenSecs by remember { mutableStateOf(store.firstTokenSecs.toString()) }
     var idleSecs by remember { mutableStateOf(store.idleSecs.toString()) }
 
+    fun settings() = ProviderSettings(
+        baseUrl = baseUrl.trim(), mainModel = mainModel.trim(), fastModel = fastModel.trim(),
+        continuousUsage = continuousUsage,
+        contextWindow = contextWindow.toUIntOrNull() ?: 128_000u,
+        maxOutputTokens = maxOutputTokens.toUIntOrNull() ?: 16_384u,
+        firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL,
+        idleSecs = idleSecs.toULongOrNull() ?: 60UL,
+        samplingJson = samplingJson.ifBlank { null }, extraBodyJson = extraBodyJson.ifBlank { null },
+    )
+
+    suspend fun persist(profile: ProviderSettings, replacement: ByteArray?) {
+        try {
+            withContext(Dispatchers.IO) { store.save(profile, replacement) }
+            apiKey = ""
+        } finally {
+            replacement?.fill(0)
+        }
+    }
+
     val cleartext = baseUrl.startsWith("http://")
 
     Column(
@@ -72,10 +109,27 @@ fun SetupScreen(onSaved: () -> Unit) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Provider", style = MaterialTheme.typography.headlineMedium)
+        if (store.configured) {
+            TextButton(onClick = onSaved) { Text("< Chats") }
+        }
+        Text("Settings", style = MaterialTheme.typography.headlineMedium)
+        AppearanceSection()
+        Text("Diagnostics", style = MaterialTheme.typography.titleLarge)
+        Text(diagnostics, style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(enabled = !testingUserland, onClick = {
+            testingUserland = true
+            scope.launch {
+                diagnostics = withContext(Dispatchers.IO) {
+                    runCatching { dev.palmcode.core.userlandSelfTest().message }
+                        .getOrDefault("Self-test unavailable")
+                }
+                testingUserland = false
+            }
+        }) { Text(if (testingUserland) "Testing…" else "Re-run self-test") }
+        Text("Provider", style = MaterialTheme.typography.titleLarge)
 
         if (cleartext) {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text(
                     "http:// endpoint — credentials and traffic unencrypted. Only acceptable on LAN/Tailscale.",
                     Modifier.padding(8.dp),
@@ -89,9 +143,16 @@ fun SetupScreen(onSaved: () -> Unit) {
             label = { Text("Base URL (…/v1)") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        Text("API key", style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(
             value = apiKey, onValueChange = { apiKey = it },
-            label = { Text(if (store.hasApiKey) "API key (stored — leave blank to keep)" else "API key") },
+            placeholder = {
+                Text(if (store.hasApiKey) "•••••••• (saved)" else "Enter API key")
+            },
+            supportingText = {
+                if (store.hasApiKey) Text("Stored securely on this device. Type a new key to replace it.")
+            },
+            enabled = !probing && !saving,
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -110,34 +171,32 @@ fun SetupScreen(onSaved: () -> Unit) {
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
-                enabled = !probing && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
+                enabled = !probing && !saving && mainModel.isNotBlank() && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
                 onClick = {
-                    // stage values so the probe runs against the edited config
-                    store.baseUrl = baseUrl
-                    store.mainModel = mainModel
-                    store.fastModel = fastModel
-                    store.continuousUsage = continuousUsage
-                    store.firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL
-                    store.idleSecs = idleSecs.toULongOrNull() ?: 60UL
-                    if (apiKey.isNotBlank()) {
-                        val bytes = apiKey.toByteArray(Charsets.UTF_8)
-                        store.saveApiKey(bytes)
-                        bytes.fill(0)
-                    }
-                    CoreManager.configureFromStore()
+                    val profile = settings()
+                    val replacement = apiKey.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
                     probing = true
                     probeError = null
                     scope.launch {
-                        val r = withContext(Dispatchers.IO) {
-                            runCatching { providerProbe() }
+                        try {
+                            persist(profile, replacement)
+                            saveMessage = "API key saved securely."
+                            if (!withContext(Dispatchers.IO) { CoreManager.configureFromStore() }) {
+                                probeError = "Settings saved, but provider configuration could not be applied. Check model and advanced settings."
+                            } else {
+                                val report = withContext(Dispatchers.IO) { providerProbe() }
+                                probe = report
+                                continuousUsage = report.continuousUsage
+                                report.maxModelLen?.let { contextWindow = it.toString() }
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            probeError = "Could not save settings or test the connection. Check your settings and retry."
+                        } finally {
+                            replacement?.fill(0)
+                            probing = false
                         }
-                        probing = false
-                        r.onSuccess {
-                            probe = it
-                            // prefill capability defaults from the probe; user can override
-                            continuousUsage = it.continuousUsage
-                            it.maxModelLen?.let { len -> contextWindow = len.toString() }
-                        }.onFailure { probeError = it.message }
                     }
                 },
             ) { Text(if (probing) "Probing…" else "Test connection") }
@@ -148,7 +207,7 @@ fun SetupScreen(onSaved: () -> Unit) {
         }
 
         probeError?.let {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text(it, Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -197,28 +256,72 @@ fun SetupScreen(onSaved: () -> Unit) {
 
         Spacer(Modifier.height(8.dp))
         Button(
-            enabled = baseUrl.isNotBlank() && mainModel.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
+            enabled = !saving && !probing && baseUrl.isNotBlank() && (apiKey.isNotBlank() || store.hasApiKey),
             onClick = {
-                store.baseUrl = baseUrl
-                store.mainModel = mainModel
-                store.fastModel = fastModel
-                store.continuousUsage = continuousUsage
-                store.contextWindow = contextWindow.toUIntOrNull() ?: 128_000u
-                store.maxOutputTokens = maxOutputTokens.toUIntOrNull() ?: 16_384u
-                store.firstTokenSecs = firstTokenSecs.toULongOrNull() ?: 120UL
-                store.idleSecs = idleSecs.toULongOrNull() ?: 60UL
-                store.samplingJson = samplingJson.ifBlank { null }
-                store.extraBodyJson = extraBodyJson.ifBlank { null }
-                if (apiKey.isNotBlank()) {
-                    val bytes = apiKey.toByteArray(Charsets.UTF_8)
-                    store.saveApiKey(bytes)
-                    bytes.fill(0)
+                val profile = settings()
+                val replacement = apiKey.takeIf { it.isNotBlank() }?.toByteArray(Charsets.UTF_8)
+                saving = true
+                saveMessage = null
+                scope.launch {
+                    try {
+                        persist(profile, replacement)
+                        saveMessage = "API key saved securely."
+                        if (profile.mainModel.isBlank()) {
+                            saveMessage = "API key saved securely. Enter a main model to continue."
+                        } else if (withContext(Dispatchers.IO) { CoreManager.configureFromStore() }) {
+                            onSaved()
+                        } else {
+                            saveMessage = "Settings and API key saved securely, but provider configuration could not be applied. Check model and advanced settings."
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        saveMessage = "Could not save provider settings securely. Please retry."
+                    } finally {
+                        replacement?.fill(0)
+                        saving = false
+                    }
                 }
-                store.configured = true
-                if (CoreManager.configureFromStore()) onSaved()
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Save and continue") }
+        ) { Text(if (saving) "Saving..." else if (mainModel.isBlank()) "Save credentials" else "Save and continue") }
+        saveMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+@Composable
+private fun AppearanceSection() {
+    val store = CoreManager.store
+    Text("Appearance", style = MaterialTheme.typography.titleLarge)
+    Text("Theme", style = MaterialTheme.typography.titleMedium)
+    Row(Modifier.fillMaxWidth().selectableGroup()) {
+        ThemeMode.entries.forEach { mode ->
+            Row(
+                Modifier.weight(1f).selectable(
+                    selected = store.themeMode == mode,
+                    onClick = { store.setAppearance(mode = mode) },
+                    role = Role.RadioButton,
+                ).heightIn(min = 48.dp).padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = store.themeMode == mode, onClick = null)
+                Text(mode.name, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Row(
+            Modifier.fillMaxWidth().toggleable(
+                value = store.dynamicColor,
+                onValueChange = { store.setAppearance(dynamic = it) },
+                role = Role.Switch,
+            ).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Dynamic color", style = MaterialTheme.typography.bodyLarge)
+            Switch(checked = store.dynamicColor, onCheckedChange = null)
+        }
     }
 }
 
@@ -235,7 +338,7 @@ private fun ProbePanel(r: ProbeReportRecord) {
         Row("cache counters", r.cachedTokens, if (r.cachedTokens) "cached_tokens exposed" else "not exposed")
         r.ttftMs?.let { Text("TTFT $it ms" + (r.sampleTps?.let { tps -> " · $tps tok/s" } ?: ""), style = MaterialTheme.typography.bodySmall) }
         r.chatError?.let {
-            Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
                 Text("sample chat failed: $it", Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
             }
         }

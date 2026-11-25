@@ -1,6 +1,6 @@
-//! [`ToSql`] and [`FromSql`] implementation for [`url::Url`].
-use crate::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+//! [`ToSql`] and [`FromSql`] implementation for [`Url`].
 use crate::Result;
+use crate::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use url::Url;
 
 /// Serialize `Url` to text.
@@ -17,17 +17,20 @@ impl FromSql for Url {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         match value {
             ValueRef::Text(s) => {
-                let s = std::str::from_utf8(s).map_err(|e| FromSqlError::Other(Box::new(e)))?;
-                Url::parse(s).map_err(|e| FromSqlError::Other(Box::new(e)))
+                let s = std::str::from_utf8(s).map_err(FromSqlError::other)?;
+                Self::parse(s).map_err(FromSqlError::other)
             }
             _ => Err(FromSqlError::InvalidType),
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
-    use crate::{params, Connection, Error, Result};
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use crate::{Connection, Error, Result, params};
     use url::{ParseError, Url};
 
     fn checked_memory_handle() -> Result<Connection> {
@@ -37,7 +40,7 @@ mod test {
     }
 
     fn get_url(db: &Connection, id: i64) -> Result<Url> {
-        db.query_row("SELECT v FROM urls WHERE i = ?", [id], |r| r.get(0))
+        db.one_column("SELECT v FROM urls WHERE i = ?", [id])
     }
 
     #[test]

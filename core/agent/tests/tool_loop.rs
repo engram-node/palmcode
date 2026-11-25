@@ -14,6 +14,123 @@ impl EventSink for Collector {
         self.0.lock().unwrap().extend(events);
     }
 }
+
+#[test]
+fn interrupted_bash_resume_never_replays_the_persisted_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = workspace_with(&[("keep.txt", "unchanged")]);
+    let db = dir.path().join("resume.db");
+    let (session, assistant) = {
+        let store = palmcode_store::Store::open(&db).unwrap();
+        let session = store.new_session("interrupted bash", "").unwrap().id;
+        let user = store.begin_message(&session, "user", false).unwrap();
+        store
+            .put_part(
+                &session,
+                user,
+                "text",
+                "Inspect the workspace before continuing",
+            )
+            .unwrap();
+        let assistant = store.begin_message(&session, "assistant", true).unwrap();
+        store
+            .tool_call_started(
+                &session,
+                assistant,
+                "old-bash",
+                "bash",
+                r#"{"command":"printf replayed > replay.txt"}"#,
+            )
+            .unwrap();
+        store.set_status(&session, "streaming").unwrap();
+        (session, assistant)
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: text_with_usage("Inspected; prior outcome unknown", 100, 5),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let collector = Arc::new(Collector(Mutex::new(vec![])));
+    let engine = Engine::start(&db, collector.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    engine.resume(&session).unwrap();
+    wait_for(
+        &collector,
+        |e| matches!(e, Event::MessageFinished { .. }),
+        "resumed message",
+    );
+    assert_eq!(
+        collector.count(|e| matches!(e, Event::ToolStarted { .. })),
+        0
+    );
+    assert!(!ws.path().join("replay.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("keep.txt")).unwrap(),
+        "unchanged"
+    );
+    let transcript = engine.transcript(&session).unwrap();
+    let old = transcript
+        .iter()
+        .find(|m| m.message_id == assistant)
+        .unwrap();
+    assert!(old.interrupted);
+    assert_eq!(old.tools[0].status, "interrupted");
+    assert!(old.tools[0].output.contains("unknown"));
+    engine.shutdown();
+}
+
+#[test]
+fn request_metrics_report_mock_usage_without_wire_content() {
+    struct Diagnostics {
+        events: Collector,
+        metrics: Mutex<Vec<palmcode_agent::RequestMetrics>>,
+    }
+    impl EventSink for Diagnostics {
+        fn on_batch(&self, events: Vec<Event>) {
+            self.events.on_batch(events);
+        }
+        fn on_request_metrics(&self, metrics: palmcode_agent::RequestMetrics) {
+            self.metrics.lock().unwrap().push(metrics);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(serve(MockConfig {
+            scripts: vec![ChatScript {
+                body: text_with_usage("answer", 120, 7),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .unwrap();
+    let sink = Arc::new(Diagnostics {
+        events: Collector(Mutex::new(vec![])),
+        metrics: Mutex::new(vec![]),
+    });
+    let engine = Engine::start(&dir.path().join("metrics.db"), sink.clone()).unwrap();
+    engine.configure(cfg(server.base_url())).unwrap();
+    let session = engine.create_session("metrics").unwrap();
+    engine.send(&session.id, "hello").unwrap();
+    wait_for(
+        &sink.events,
+        |e| matches!(e, Event::MessageFinished { .. }),
+        "metrics completion",
+    );
+    let metrics = sink.metrics.lock().unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(metrics[0].ok);
+    assert_eq!(metrics[0].prompt_tokens, Some(120));
+    assert_eq!(metrics[0].completion_tokens, Some(7));
+    assert_eq!(metrics[0].cached_tokens, None);
+    assert_eq!(metrics[0].retries, Some(0));
+}
 impl Collector {
     fn has(&self, pred: impl Fn(&Event) -> bool) -> bool {
         self.0.lock().unwrap().iter().any(pred)
@@ -132,6 +249,183 @@ fn workspace_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         std::fs::write(p, content).unwrap();
     }
     ws
+}
+
+#[test]
+fn signed_tool_metadata_is_echoed_after_execution_and_restart() {
+    let metadata = serde_json::json!({"google":{"thought_signature":"fixture-signature"}});
+    let payload = serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+        "index":0,"id":"signed-read","function":{"name":"read","arguments":"{\"path\":\"src/main.rs\"}"},"extra_content":metadata
+    }]},"finish_reason":"stop"}]});
+    let body = format!("data: {payload}\n\ndata: [DONE]\n\n").into_bytes();
+    let Rig {
+        _dir,
+        c,
+        engine,
+        _server,
+        _rt,
+        base,
+    } = setup(vec![body, text_with_usage("Read completed", 50, 3)]);
+    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Signed exchange").unwrap();
+    let mid = engine.send(&session.id, "Read the file").unwrap();
+    wait_for(
+        &c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "signed tool followup",
+    );
+    let chats: Vec<serde_json::Value> = _server
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| serde_json::from_slice(body).unwrap())
+        .filter(|body: &serde_json::Value| body.get("stream").is_some())
+        .collect();
+    let assistant = chats[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["tool_calls"][0]["extra_content"], metadata);
+    engine.shutdown();
+    drop(engine);
+    let reopened = Engine::start(&_dir.path().join("t.db"), c.clone()).unwrap();
+    reopened.configure(cfg(base)).unwrap();
+    let mid = reopened
+        .send(&session.id, "Continue from the saved result")
+        .unwrap();
+    wait_for(
+        &c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "reopened followup",
+    );
+    let bodies = _server.bodies.lock().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(bodies.last().unwrap()).unwrap();
+    let assistant = wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["tool_calls"][0]["extra_content"], metadata);
+    assert_eq!(
+        c.count(|event| matches!(event, Event::ToolStarted { .. })),
+        1
+    );
+    reopened.shutdown();
+}
+
+#[test]
+fn stop_labeled_tool_after_normal_replies_runs_and_persists_a_card_and_answer() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_READ))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![
+        text_with_usage("Hello", 20, 2),
+        text_with_usage("Ready", 30, 2),
+        tool,
+        fixture("tool_result_followup.sse", FOLLOWUP),
+    ]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("src/main.rs", "fn main() {}\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Tool after chat").unwrap();
+    for prompt in ["Hello", "Ready?", "Read src/main.rs"] {
+        let mid = engine.send(&session.id, prompt).unwrap();
+        wait_for(
+            c,
+            |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+            "completed reply",
+        );
+    }
+    assert!(c.has(|event| matches!(event, Event::ToolStarted { name, .. } if name == "read")));
+    assert!(c.has(|event| matches!(event, Event::ToolFinished { ok: true, .. })));
+    let transcript = engine.transcript(&session.id).unwrap();
+    let reply = transcript.last().unwrap();
+    assert!(!reply.text.is_empty());
+    assert_eq!(reply.tools.len(), 1);
+    assert_eq!(reply.tools[0].name, "read");
+    assert_eq!(reply.tools[0].status, "done");
+    assert_eq!(c.count(|event| matches!(event, Event::TurnError { .. })), 0);
+}
+
+#[test]
+fn stop_labeled_write_still_requires_approval_and_respects_denial() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_WRITE))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![tool, text_with_usage("Write denied", 40, 3)]);
+    let Rig { c, engine, .. } = &rig;
+    let ws = workspace_with(&[("src/main.rs", "untouched\n")]);
+    engine.set_workspace(ws.path().to_str().unwrap()).unwrap();
+    let session = engine.create_session("Approval regression").unwrap();
+    let mid = engine.send(&session.id, "Change the file").unwrap();
+    wait_for(
+        c,
+        |event| matches!(event, Event::ApprovalRequested { request_id: 1, .. }),
+        "approval",
+    );
+    engine.resolve_approval(1, false, ApprovalScope::Once);
+    wait_for(
+        c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "completed reply",
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("src/main.rs")).unwrap(),
+        "untouched\n"
+    );
+    assert!(c.has(|event| matches!(
+        event,
+        Event::ApprovalResolved {
+            approved: false,
+            ..
+        }
+    )));
+    assert!(c.has(|event| matches!(event, Event::ToolFinished { ok: false, .. })));
+}
+
+#[test]
+fn stop_labeled_call_without_workspace_explains_missing_tools() {
+    let tool = String::from_utf8(fixture("tool_call.sse", TOOL_CALL_READ))
+        .unwrap()
+        .replace(
+            "\"finish_reason\":\"tool_calls\"",
+            "\"finish_reason\":\"stop\"",
+        )
+        .into_bytes();
+    let rig = setup(vec![tool]);
+    let Rig { c, engine, .. } = &rig;
+    let session = engine.create_session("No workspace").unwrap();
+    let mid = engine.send(&session.id, "Read a file").unwrap();
+    wait_for(
+        c,
+        |event| matches!(event, Event::MessageFinished { message_id, .. } if *message_id == mid),
+        "completed reply",
+    );
+    let transcript = engine.transcript(&session.id).unwrap();
+    assert!(
+        transcript
+            .last()
+            .unwrap()
+            .text
+            .contains("no workspace is connected")
+    );
+    assert_eq!(
+        c.count(|event| matches!(event, Event::ToolStarted { .. })),
+        0
+    );
 }
 
 #[test]
