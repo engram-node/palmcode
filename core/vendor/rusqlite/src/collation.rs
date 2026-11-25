@@ -1,22 +1,17 @@
 //! Add, remove, or modify a collation
 use std::cmp::Ordering;
-use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::catch_unwind;
 use std::ptr;
-use std::slice;
 
 use crate::ffi;
-use crate::{str_to_cstring, Connection, InnerConnection, Result};
-
-// FIXME copy/paste from function.rs
-unsafe extern "C" fn free_boxed_value<T>(p: *mut c_void) {
-    drop(Box::from_raw(p.cast::<T>()));
-}
+use crate::util::{free_boxed_value, from_raw_parts};
+use crate::{Connection, Error, InnerConnection, Name, Result};
 
 impl Connection {
     /// Add or modify a collation.
     #[inline]
-    pub fn create_collation<C>(&self, collation_name: &str, x_compare: C) -> Result<()>
+    pub fn create_collation<C, N: Name>(&self, collation_name: N, x_compare: C) -> Result<()>
     where
         C: Fn(&str, &str) -> Ordering + Send + 'static,
     {
@@ -27,16 +22,13 @@ impl Connection {
 
     /// Collation needed callback
     #[inline]
-    pub fn collation_needed(
-        &self,
-        x_coll_needed: fn(&Connection, &str) -> Result<()>,
-    ) -> Result<()> {
+    pub fn collation_needed(&self, x_coll_needed: fn(&Self, &str) -> Result<()>) -> Result<()> {
         self.db.borrow_mut().collation_needed(x_coll_needed)
     }
 
     /// Remove collation.
     #[inline]
-    pub fn remove_collation(&self, collation_name: &str) -> Result<()> {
+    pub fn remove_collation<N: Name>(&self, collation_name: N) -> Result<()> {
         self.db.borrow_mut().remove_collation(collation_name)
     }
 }
@@ -64,7 +56,7 @@ impl InnerConnection {
     ///     Ok(())
     /// }
     /// ```
-    fn create_collation<C>(&mut self, collation_name: &str, x_compare: C) -> Result<()>
+    fn create_collation<C, N: Name>(&mut self, collation_name: N, x_compare: C) -> Result<()>
     where
         C: Fn(&str, &str) -> Ordering + Send + 'static,
     {
@@ -78,24 +70,23 @@ impl InnerConnection {
         where
             C: Fn(&str, &str) -> Ordering,
         {
-            let r = catch_unwind(|| {
-                let boxed_f: *mut C = arg1.cast::<C>();
-                assert!(!boxed_f.is_null(), "Internal error - null function pointer");
-                let s1 = {
-                    let c_slice = slice::from_raw_parts(arg3.cast::<u8>(), arg2 as usize);
-                    String::from_utf8_lossy(c_slice)
-                };
-                let s2 = {
-                    let c_slice = slice::from_raw_parts(arg5.cast::<u8>(), arg4 as usize);
-                    String::from_utf8_lossy(c_slice)
-                };
-                (*boxed_f)(s1.as_ref(), s2.as_ref())
-            });
-            let t = match r {
-                Err(_) => {
-                    return -1; // FIXME How ?
-                }
-                Ok(r) => r,
+            let r = unsafe {
+                catch_unwind(|| {
+                    let boxed_f: *mut C = arg1.cast::<C>();
+                    assert!(!boxed_f.is_null(), "Internal error - null function pointer");
+                    let s1 = {
+                        let c_slice = from_raw_parts(arg3.cast::<u8>(), arg2);
+                        String::from_utf8_lossy(c_slice)
+                    };
+                    let s2 = {
+                        let c_slice = from_raw_parts(arg5.cast::<u8>(), arg4);
+                        String::from_utf8_lossy(c_slice)
+                    };
+                    (*boxed_f)(s1.as_ref(), s2.as_ref())
+                })
+            };
+            let Ok(t) = r else {
+                return -1; // FIXME How ?
             };
 
             match t {
@@ -106,7 +97,7 @@ impl InnerConnection {
         }
 
         let boxed_f: *mut C = Box::into_raw(Box::new(x_compare));
-        let c_name = str_to_cstring(collation_name)?;
+        let c_name = collation_name.as_cstr()?;
         let flags = ffi::SQLITE_UTF8;
         let r = unsafe {
             ffi::sqlite3_create_collation_v2(
@@ -132,31 +123,42 @@ impl InnerConnection {
         x_coll_needed: fn(&Connection, &str) -> Result<()>,
     ) -> Result<()> {
         use std::mem;
-        #[allow(clippy::needless_return)]
+        #[expect(clippy::needless_return)]
         unsafe extern "C" fn collation_needed_callback(
             arg1: *mut c_void,
             arg2: *mut ffi::sqlite3,
             e_text_rep: c_int,
             arg3: *const c_char,
         ) {
-            use std::ffi::CStr;
             use std::str;
 
             if e_text_rep != ffi::SQLITE_UTF8 {
                 // TODO: validate
                 return;
             }
-
-            let callback: fn(&Connection, &str) -> Result<()> = mem::transmute(arg1);
-            let res = catch_unwind(|| {
-                let conn = Connection::from_handle(arg2).unwrap();
-                let collation_name = CStr::from_ptr(arg3)
-                    .to_str()
-                    .expect("illegal collation sequence name");
-                callback(&conn, collation_name)
-            });
-            if res.is_err() {
-                return; // FIXME How ?
+            unsafe {
+                let callback: fn(&Connection, &str) -> Result<()> = mem::transmute(arg1);
+                let res = catch_unwind(|| {
+                    let conn = Connection::from_handle(arg2).unwrap();
+                    let collation_name = CStr::from_ptr(arg3)
+                        .to_str()
+                        .expect("illegal collation sequence name");
+                    callback(&conn, collation_name)
+                })
+                .unwrap_or_else(|_| Err(Error::UnwindingPanic));
+                if let Err(err) = res {
+                    #[cfg(feature = "modern_sqlite")]
+                    // 3.51.0
+                    if let Ok(msg) = std::ffi::CString::new(format!("{err}")) {
+                        let _ = crate::error::set_errmsg(
+                            arg2,
+                            err.sqlite_extended_error_code()
+                                .unwrap_or(ffi::SQLITE_ERROR),
+                            Some(&msg),
+                        );
+                    }
+                    return;
+                }
             }
         }
 
@@ -171,8 +173,8 @@ impl InnerConnection {
     }
 
     #[inline]
-    fn remove_collation(&mut self, collation_name: &str) -> Result<()> {
-        let c_name = str_to_cstring(collation_name)?;
+    fn remove_collation<N: Name>(&mut self, collation_name: N) -> Result<()> {
+        let c_name = collation_name.as_cstr()?;
         let r = unsafe {
             ffi::sqlite3_create_collation_v2(
                 self.db(),
@@ -187,10 +189,13 @@ impl InnerConnection {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
-    use crate::{Connection, Result};
-    use fallible_streaming_iterator::FallibleStreamingIterator;
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use crate::{Connection, Result, error, ffi};
+    use fallible_streaming_iterator::FallibleStreamingIterator as _;
     use std::cmp::Ordering;
     use unicase::UniCase;
 
@@ -201,7 +206,7 @@ mod test {
     #[test]
     fn test_unicase() -> Result<()> {
         let db = Connection::open_in_memory()?;
-        db.create_collation("unicase", unicase_compare)?;
+        db.create_collation(c"unicase", unicase_compare)?;
         collate(db)
     }
 
@@ -233,9 +238,26 @@ mod test {
     }
 
     #[test]
+    fn test_collation_needed_error() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.collation_needed(|_, _| {
+            Err(error::error_from_sqlite_code(
+                ffi::SQLITE_ERROR,
+                Some("Oops".to_owned()),
+            ))
+        })?;
+        let err = collate(db).unwrap_err();
+        assert_eq!(
+            err.sqlite_extended_error_code(),
+            Some(ffi::SQLITE_ERROR_MISSING_COLLSEQ)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn remove_collation() -> Result<()> {
         let db = Connection::open_in_memory()?;
-        db.create_collation("unicase", unicase_compare)?;
-        db.remove_collation("unicase")
+        db.create_collation(c"unicase", unicase_compare)?;
+        db.remove_collation(c"unicase")
     }
 }

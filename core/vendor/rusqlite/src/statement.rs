@@ -1,21 +1,18 @@
-use std::os::raw::{c_int, c_void};
-#[cfg(feature = "array")]
-use std::rc::Rc;
-use std::slice::from_raw_parts;
+use std::ffi::{c_int, c_void};
 use std::{fmt, mem, ptr, str};
 
-use super::ffi;
-use super::{len_as_c_int, str_for_sqlite};
+use super::ffi::{self, sqlite3_stmt};
+use super::str_for_sqlite;
 use super::{
     AndThenRows, Connection, Error, MappedRows, Params, RawStatement, Result, Row, Rows, ValueRef,
 };
-use crate::types::{ToSql, ToSqlOutput};
-#[cfg(feature = "array")]
-use crate::vtab::array::{free_array, ARRAY_TYPE};
+use crate::bind::BindIndex;
+use crate::types::{ToSql, ToSqlOutput, Value};
+use crate::util::from_raw_parts;
 
 /// A prepared statement.
 pub struct Statement<'conn> {
-    conn: &'conn Connection,
+    pub(crate) conn: &'conn Connection,
     pub(crate) stmt: RawStatement,
 }
 
@@ -380,6 +377,33 @@ impl Statement<'_> {
         rows.get_expected_row().and_then(f)
     }
 
+    /// Convenience method to execute a query that is expected to return exactly
+    /// one row.
+    ///
+    /// Returns `Err(QueryReturnedMoreThanOneRow)` if the query returns more than one row.
+    ///
+    /// Returns `Err(QueryReturnedNoRows)` if no results are returned. If the
+    /// query truly is optional, you can call
+    /// [`.optional()`](crate::OptionalExtension::optional) on the result of
+    /// this to get a `Result<Option<T>>` (requires that the trait
+    /// `rusqlite::OptionalExtension` is imported).
+    ///
+    /// # Failure
+    ///
+    /// Will return `Err` if the underlying SQLite call fails.
+    pub fn query_one<T, P, F>(&mut self, params: P, f: F) -> Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> Result<T>,
+    {
+        let mut rows = self.query(params)?;
+        let row = rows.get_expected_row().and_then(f)?;
+        if rows.next()?.is_some() {
+            return Err(Error::QueryReturnedMoreThanOneRow);
+        }
+        Ok(row)
+    }
+
     /// Consumes the statement.
     ///
     /// Functionally equivalent to the `Drop` implementation, but allows
@@ -461,35 +485,32 @@ impl Statement<'_> {
             }
             self.bind_parameter(&p, index)?;
         }
-        if index != expected {
-            Err(Error::InvalidParameterCount(index, expected))
-        } else {
+        if index == expected {
             Ok(())
+        } else {
+            Err(Error::InvalidParameterCount(index, expected))
         }
     }
 
     #[inline]
     pub(crate) fn ensure_parameter_count(&self, n: usize) -> Result<()> {
         let count = self.parameter_count();
-        if count != n {
-            Err(Error::InvalidParameterCount(n, count))
-        } else {
+        if count == n {
             Ok(())
+        } else {
+            Err(Error::InvalidParameterCount(n, count))
         }
     }
 
     #[inline]
-    pub(crate) fn bind_parameters_named<T: ?Sized + ToSql>(
+    pub(crate) fn bind_parameters_named<S: BindIndex, T: ToSql>(
         &mut self,
-        params: &[(&str, &T)],
+        params: &[(S, T)],
     ) -> Result<()> {
-        for &(name, value) in params {
-            if let Some(i) = self.parameter_index(name)? {
-                let ts: &dyn ToSql = &value;
-                self.bind_parameter(ts, i)?;
-            } else {
-                return Err(Error::InvalidParameterName(name.into()));
-            }
+        for (name, value) in params {
+            let i = name.idx(self)?;
+            let ts: &dyn ToSql = &value;
+            self.bind_parameter(ts, i)?;
         }
         Ok(())
     }
@@ -533,8 +554,7 @@ impl Statement<'_> {
     /// # use rusqlite::{Connection, Result};
     /// fn query(conn: &Connection) -> Result<()> {
     ///     let mut stmt = conn.prepare("SELECT * FROM test WHERE name = :name AND value > ?2")?;
-    ///     let name_index = stmt.parameter_index(":name")?.expect("No such parameter");
-    ///     stmt.raw_bind_parameter(name_index, "foo")?;
+    ///     stmt.raw_bind_parameter(c":name", "foo")?;
     ///     stmt.raw_bind_parameter(2, 100)?;
     ///     let mut rows = stmt.raw_query();
     ///     while let Some(row) = rows.next()? {
@@ -544,14 +564,14 @@ impl Statement<'_> {
     /// }
     /// ```
     #[inline]
-    pub fn raw_bind_parameter<T: ToSql>(
+    pub fn raw_bind_parameter<I: BindIndex, T: ToSql>(
         &mut self,
-        one_based_col_index: usize,
+        one_based_index: I,
         param: T,
     ) -> Result<()> {
         // This is the same as `bind_parameter` but slightly more ergonomic and
         // correctly takes `&mut self`.
-        self.bind_parameter(&param, one_based_col_index)
+        self.bind_parameter(&param, one_based_index.idx(self)?)
     }
 
     /// Low level API to execute a statement given that all parameters were
@@ -591,66 +611,80 @@ impl Statement<'_> {
     }
 
     // generic because many of these branches can constant fold away.
-    fn bind_parameter<P: ?Sized + ToSql>(&self, param: &P, col: usize) -> Result<()> {
+    fn bind_parameter<P: ?Sized + ToSql>(&self, param: &P, ndx: usize) -> Result<()> {
         let value = param.to_sql()?;
 
         let ptr = unsafe { self.stmt.ptr() };
-        let value = match value {
-            ToSqlOutput::Borrowed(v) => v,
-            ToSqlOutput::Owned(ref v) => ValueRef::from(v),
-
+        self.conn.decode_result(match value {
+            ToSqlOutput::Borrowed(ValueRef::Null) | ToSqlOutput::Owned(Value::Null) => {
+                unsafe { ffi::sqlite3_bind_null(ptr, ndx as c_int) }
+            },
+            ToSqlOutput::Borrowed(ValueRef::Integer(i)) | ToSqlOutput::Owned(Value::Integer(i)) => {
+                unsafe { ffi::sqlite3_bind_int64(ptr, ndx as c_int, i) }
+            },
+            ToSqlOutput::Borrowed(ValueRef::Real(r)) | ToSqlOutput::Owned(Value::Real(r)) => {
+                unsafe { ffi::sqlite3_bind_double(ptr, ndx as c_int, r) }
+            },
+            ToSqlOutput::Borrowed(ValueRef::Text(s)) => {
+                Self::bind_text(ptr, ndx, s)
+            },
+             ToSqlOutput::Owned(Value::Text(s)) => {
+                Self::bind_text(ptr, ndx, s.as_bytes())
+            },
+            ToSqlOutput::Borrowed(ValueRef::Blob(b)) => {
+                Self::bind_blob(ptr, ndx, b)
+            },
+            ToSqlOutput::Owned(Value::Blob(b)) => {
+                Self::bind_blob(ptr, ndx, b.as_slice())
+            },
             #[cfg(feature = "blob")]
             ToSqlOutput::ZeroBlob(len) => {
-                // TODO sqlite3_bind_zeroblob64 // 3.8.11
-                return self
-                    .conn
-                    .decode_result(unsafe { ffi::sqlite3_bind_zeroblob(ptr, col as c_int, len) });
+                unsafe {
+                    ffi::sqlite3_bind_zeroblob64(ptr, ndx as c_int, len)
+                }
             }
             #[cfg(feature = "functions")]
             ToSqlOutput::Arg(_) => {
-                return Err(Error::SqliteFailure(
-                    ffi::Error::new(ffi::SQLITE_MISUSE),
-                    Some(format!("Unsupported value \"{value:?}\"")),
-                ));
+                return Err(err!(ffi::SQLITE_MISUSE, "Unsupported value \"{value:?}\""));
             }
-            #[cfg(feature = "array")]
-            ToSqlOutput::Array(a) => {
-                return self.conn.decode_result(unsafe {
-                    ffi::sqlite3_bind_pointer(
-                        ptr,
-                        col as c_int,
-                        Rc::into_raw(a) as *mut c_void,
-                        ARRAY_TYPE,
-                        Some(free_array),
-                    )
-                });
-            }
-        };
-        self.conn.decode_result(match value {
-            ValueRef::Null => unsafe { ffi::sqlite3_bind_null(ptr, col as c_int) },
-            ValueRef::Integer(i) => unsafe { ffi::sqlite3_bind_int64(ptr, col as c_int, i) },
-            ValueRef::Real(r) => unsafe { ffi::sqlite3_bind_double(ptr, col as c_int, r) },
-            ValueRef::Text(s) => unsafe {
-                let (c_str, len, destructor) = str_for_sqlite(s)?;
-                // TODO sqlite3_bind_text64 // 3.8.7
-                ffi::sqlite3_bind_text(ptr, col as c_int, c_str, len, destructor)
-            },
-            ValueRef::Blob(b) => unsafe {
-                let length = len_as_c_int(b.len())?;
-                if length == 0 {
-                    ffi::sqlite3_bind_zeroblob(ptr, col as c_int, 0)
-                } else {
-                    // TODO sqlite3_bind_blob64 // 3.8.7
-                    ffi::sqlite3_bind_blob(
-                        ptr,
-                        col as c_int,
-                        b.as_ptr().cast::<c_void>(),
-                        length,
-                        ffi::SQLITE_TRANSIENT(),
-                    )
+            #[cfg(feature = "pointer")]
+            ToSqlOutput::Pointer(p) => {
+                unsafe {
+                    ffi::sqlite3_bind_pointer(ptr, ndx as c_int, p.0.cast_mut(), p.1.as_ptr(), p.2)
                 }
-            },
+            }
         })
+    }
+
+    fn bind_text(stmt: *mut sqlite3_stmt, ndx: usize, s: &[u8]) -> c_int {
+        unsafe {
+            let (c_str, len, destructor) = str_for_sqlite(s);
+            ffi::sqlite3_bind_text64(
+                stmt,
+                ndx as c_int,
+                c_str,
+                len,
+                destructor,
+                ffi::SQLITE_UTF8 as _, // TODO SQLITE_UTF8_ZT
+            )
+        }
+    }
+
+    fn bind_blob(stmt: *mut sqlite3_stmt, ndx: usize, b: &[u8]) -> c_int {
+        unsafe {
+            let length = b.len();
+            if length == 0 {
+                ffi::sqlite3_bind_zeroblob64(stmt, ndx as c_int, 0)
+            } else {
+                ffi::sqlite3_bind_blob64(
+                    stmt,
+                    ndx as c_int,
+                    b.as_ptr().cast::<c_void>(),
+                    length as ffi::sqlite3_uint64,
+                    ffi::SQLITE_TRANSIENT(),
+                )
+            }
+        }
     }
 
     #[inline]
@@ -670,25 +704,22 @@ impl Statement<'_> {
 
     #[inline]
     fn finalize_(&mut self) -> Result<()> {
-        let mut stmt = unsafe { RawStatement::new(ptr::null_mut(), 0) };
+        let mut stmt = unsafe { RawStatement::new(ptr::null_mut()) };
         mem::swap(&mut stmt, &mut self.stmt);
         self.conn.decode_result(stmt.finalize())
     }
 
-    #[cfg(feature = "extra_check")]
-    #[inline]
-    fn check_update(&self) -> Result<()> {
-        // sqlite3_column_count works for DML but not for DDL (ie ALTER)
-        if self.column_count() > 0 && self.stmt.readonly() {
-            return Err(Error::ExecuteReturnedResults);
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "extra_check"))]
     #[inline]
     #[allow(clippy::unnecessary_wraps)]
     fn check_update(&self) -> Result<()> {
+        cfg_select! {
+            feature = "extra_check" => {
+                if self.column_count() > 0 && self.stmt.readonly() {
+                    return Err(Error::ExecuteReturnedResults);
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -717,8 +748,6 @@ impl Statement<'_> {
     /// or 2 if the statement is an EXPLAIN QUERY PLAN,
     /// or 0 if it is an ordinary statement or a NULL pointer.
     #[inline]
-    #[cfg(feature = "modern_sqlite")] // 3.28.0
-    #[cfg_attr(docsrs, doc(cfg(feature = "modern_sqlite")))]
     pub fn is_explain(&self) -> i32 {
         self.stmt.is_explain()
     }
@@ -729,36 +758,26 @@ impl Statement<'_> {
         self.stmt.readonly()
     }
 
-    #[cfg(feature = "extra_check")]
-    #[inline]
-    pub(crate) fn check_no_tail(&self) -> Result<()> {
-        if self.stmt.has_tail() {
-            Err(Error::MultipleStatement)
-        } else {
-            Ok(())
-        }
-    }
-
-    #[cfg(not(feature = "extra_check"))]
-    #[inline]
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn check_no_tail(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Safety: This is unsafe, because using `sqlite3_stmt` after the
     /// connection has closed is illegal, but `RawStatement` does not enforce
     /// this, as it loses our protective `'conn` lifetime bound.
     #[inline]
+    #[cfg(feature = "cache")]
     pub(crate) unsafe fn into_raw(mut self) -> RawStatement {
-        let mut stmt = RawStatement::new(ptr::null_mut(), 0);
-        mem::swap(&mut stmt, &mut self.stmt);
-        stmt
+        unsafe {
+            let mut stmt = RawStatement::new(ptr::null_mut());
+            mem::swap(&mut stmt, &mut self.stmt);
+            stmt
+        }
     }
 
     /// Reset all bindings
     pub fn clear_bindings(&mut self) {
         self.stmt.clear_bindings();
+    }
+
+    pub(crate) unsafe fn ptr(&self) -> *mut ffi::sqlite3_stmt {
+        unsafe { self.stmt.ptr() }
     }
 }
 
@@ -778,7 +797,7 @@ impl fmt::Debug for Statement<'_> {
 }
 
 impl Drop for Statement<'_> {
-    #[allow(unused_must_use)]
+    #[expect(unused_must_use)]
     #[inline]
     fn drop(&mut self) {
         self.finalize_();
@@ -814,7 +833,7 @@ impl Statement<'_> {
                         !text.is_null(),
                         "unexpected SQLITE_TEXT column type with NULL data"
                     );
-                    from_raw_parts(text.cast::<u8>(), len as usize)
+                    from_raw_parts(text.cast::<u8>(), len)
                 };
 
                 ValueRef::Text(s)
@@ -836,7 +855,7 @@ impl Statement<'_> {
                         !blob.is_null(),
                         "unexpected SQLITE_BLOB column type with NULL data"
                     );
-                    ValueRef::Blob(unsafe { from_raw_parts(blob.cast::<u8>(), len as usize) })
+                    ValueRef::Blob(unsafe { from_raw_parts(blob.cast::<u8>(), len) })
                 } else {
                     // The return value from sqlite3_column_blob() for a zero-length BLOB
                     // is a NULL pointer.
@@ -876,30 +895,33 @@ impl Statement<'_> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StatementStatus {
-    /// Equivalent to SQLITE_STMTSTATUS_FULLSCAN_STEP
+    /// Equivalent to `SQLITE_STMTSTATUS_FULLSCAN_STEP`
     FullscanStep = 1,
-    /// Equivalent to SQLITE_STMTSTATUS_SORT
+    /// Equivalent to `SQLITE_STMTSTATUS_SORT`
     Sort = 2,
-    /// Equivalent to SQLITE_STMTSTATUS_AUTOINDEX
+    /// Equivalent to `SQLITE_STMTSTATUS_AUTOINDEX`
     AutoIndex = 3,
-    /// Equivalent to SQLITE_STMTSTATUS_VM_STEP
+    /// Equivalent to `SQLITE_STMTSTATUS_VM_STEP`
     VmStep = 4,
-    /// Equivalent to SQLITE_STMTSTATUS_REPREPARE (3.20.0)
+    /// Equivalent to `SQLITE_STMTSTATUS_REPREPARE` (3.20.0)
     RePrepare = 5,
-    /// Equivalent to SQLITE_STMTSTATUS_RUN (3.20.0)
+    /// Equivalent to `SQLITE_STMTSTATUS_RUN` (3.20.0)
     Run = 6,
-    /// Equivalent to SQLITE_STMTSTATUS_FILTER_MISS
+    /// Equivalent to `SQLITE_STMTSTATUS_FILTER_MISS`
     FilterMiss = 7,
-    /// Equivalent to SQLITE_STMTSTATUS_FILTER_HIT
+    /// Equivalent to `SQLITE_STMTSTATUS_FILTER_HIT`
     FilterHit = 8,
-    /// Equivalent to SQLITE_STMTSTATUS_MEMUSED (3.20.0)
+    /// Equivalent to `SQLITE_STMTSTATUS_MEMUSED` (3.20.0)
     MemUsed = 99,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use crate::types::ToSql;
-    use crate::{params_from_iter, Connection, Error, Result};
+    use crate::{Connection, Error, Result, params_from_iter};
 
     #[test]
     fn test_execute_named() -> Result<()> {
@@ -949,11 +971,12 @@ mod test {
         db.execute_batch(sql)?;
 
         let mut stmt = db.prepare("INSERT INTO test (name) VALUES (:name)")?;
-        stmt.execute(&[(":name", &"one")])?;
+        stmt.execute(&[(":name", "one")])?;
+        stmt.execute(vec![(":name", "one")].as_slice())?;
 
         let mut stmt = db.prepare("SELECT COUNT(*) FROM test WHERE name = :name")?;
         assert_eq!(
-            1i32,
+            2i32,
             stmt.query_row::<i32, _, _>(&[(":name", "one")], |r| r.get(0))?
         );
         Ok(())
@@ -1020,7 +1043,7 @@ mod test {
         assert_eq!(1, doubled_id);
 
         // second row should be an `Err`
-        #[allow(clippy::match_wild_err_arm)]
+        #[expect(clippy::match_wild_err_arm)]
         match rows.next().unwrap() {
             Ok(_) => panic!("invalid Ok"),
             Err(Error::SqliteSingleThreadedMode) => (),
@@ -1036,9 +1059,9 @@ mod test {
         db.execute_batch(sql)?;
 
         let mut stmt = db.prepare("INSERT INTO test (x, y) VALUES (:x, :y)")?;
-        stmt.execute(&[(":x", &"one")])?;
+        stmt.execute(&[(":x", "one")])?;
 
-        let result: Option<String> = db.one_column("SELECT y FROM test WHERE x = 'one'")?;
+        let result: Option<String> = db.one_column("SELECT y FROM test WHERE x = 'one'", [])?;
         assert!(result.is_none());
         Ok(())
     }
@@ -1050,8 +1073,8 @@ mod test {
         {
             let mut stmt = db.prepare("INSERT INTO test (name, value) VALUES (:name, ?3)")?;
 
-            let name_idx = stmt.parameter_index(":name")?.unwrap();
-            stmt.raw_bind_parameter(name_idx, "example")?;
+            stmt.raw_bind_parameter(c":name", "example")?;
+            stmt.raw_bind_parameter(":name", "example")?;
             stmt.raw_bind_parameter(3, 50i32)?;
             let n = stmt.raw_execute()?;
             assert_eq!(n, 1);
@@ -1082,9 +1105,9 @@ mod test {
 
         let mut stmt = db.prepare("INSERT INTO test (x, y) VALUES (:x, :y)")?;
         stmt.execute(&[(":x", "one")])?;
-        stmt.execute(&[(":y", "two")])?;
+        stmt.execute(&[(c":y", "two")])?;
 
-        let result: String = db.one_column("SELECT x FROM test WHERE y = 'two'")?;
+        let result: String = db.one_column("SELECT x FROM test WHERE y = 'two'", [])?;
         assert_eq!(result, "one");
         Ok(())
     }
@@ -1191,6 +1214,22 @@ mod test {
     }
 
     #[test]
+    fn query_one() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE foo(x INTEGER, y INTEGER);")?;
+        let mut stmt = db.prepare("SELECT y FROM foo WHERE x = ?1")?;
+        let y: Result<i64> = stmt.query_one([1i32], |r| r.get(0));
+        assert_eq!(Error::QueryReturnedNoRows, y.unwrap_err());
+        db.execute_batch("INSERT INTO foo VALUES(1, 3);")?;
+        let y: Result<i64> = stmt.query_one([1i32], |r| r.get(0));
+        assert_eq!(3i64, y?);
+        db.execute_batch("INSERT INTO foo VALUES(1, 3);")?;
+        let y: Result<i64> = stmt.query_one([1i32], |r| r.get(0));
+        assert_eq!(Error::QueryReturnedMoreThanOneRow, y.unwrap_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_query_by_column_name() -> Result<()> {
         let db = Connection::open_in_memory()?;
         let sql = "BEGIN;
@@ -1285,9 +1324,16 @@ mod test {
         let conn = Connection::open_in_memory()?;
         let mut stmt = conn.prepare("")?;
         assert_eq!(0, stmt.column_count());
-        stmt.parameter_index("test").unwrap();
-        stmt.step().unwrap_err();
-        stmt.reset().unwrap(); // SQLITE_OMIT_AUTORESET = false
+        stmt.parameter_index("test")?;
+        let err = stmt.step().unwrap_err();
+        assert_eq!(err.sqlite_error_code(), Some(crate::ErrorCode::ApiMisuse));
+        assert_eq!(
+            err.sqlite_extended_error_code(),
+            Some(crate::ffi::SQLITE_MISUSE)
+        );
+        // error msg is different with sqlcipher, so we use assert_ne:
+        assert_ne!(err.to_string(), "not an error".to_owned());
+        stmt.reset()?; // SQLITE_OMIT_AUTORESET = false
         stmt.execute([]).unwrap_err();
         Ok(())
     }
@@ -1319,12 +1365,12 @@ mod test {
     fn test_utf16_conversion() -> Result<()> {
         let db = Connection::open_in_memory()?;
         db.pragma_update(None, "encoding", "UTF-16le")?;
-        let encoding: String = db.pragma_query_value(None, "encoding", |row| row.get(0))?;
+        let encoding: String = db.pragma_query_one(None, "encoding")?;
         assert_eq!("UTF-16le", encoding);
         db.execute_batch("CREATE TABLE foo(x TEXT)")?;
         let expected = "テスト";
         db.execute("INSERT INTO foo(x) VALUES (?1)", [&expected])?;
-        let actual: String = db.one_column("SELECT x FROM foo")?;
+        let actual: String = db.one_column("SELECT x FROM foo", [])?;
         assert_eq!(expected, actual);
         Ok(())
     }
@@ -1333,13 +1379,12 @@ mod test {
     fn test_nul_byte() -> Result<()> {
         let db = Connection::open_in_memory()?;
         let expected = "a\x00b";
-        let actual: String = db.query_row("SELECT ?1", [expected], |row| row.get(0))?;
+        let actual: String = db.one_column("SELECT ?1", [expected])?;
         assert_eq!(expected, actual);
         Ok(())
     }
 
     #[test]
-    #[cfg(feature = "modern_sqlite")]
     fn is_explain() -> Result<()> {
         let db = Connection::open_in_memory()?;
         let stmt = db.prepare("SELECT 1;")?;
@@ -1356,7 +1401,6 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "modern_sqlite")] // SQLite >= 3.38.0
     fn test_error_offset() -> Result<()> {
         use crate::ffi::ErrorCode;
         let db = Connection::open_in_memory()?;

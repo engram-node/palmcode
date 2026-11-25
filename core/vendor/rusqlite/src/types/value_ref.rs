@@ -36,7 +36,7 @@ impl ValueRef<'_> {
 
 impl<'a> ValueRef<'a> {
     /// If `self` is case `Integer`, returns the integral value. Otherwise,
-    /// returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_i64(&self) -> FromSqlResult<i64> {
         match *self {
@@ -47,7 +47,7 @@ impl<'a> ValueRef<'a> {
 
     /// If `self` is case `Null` returns None.
     /// If `self` is case `Integer`, returns the integral value.
-    /// Otherwise, returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// Otherwise, returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_i64_or_null(&self) -> FromSqlResult<Option<i64>> {
         match *self {
@@ -58,7 +58,7 @@ impl<'a> ValueRef<'a> {
     }
 
     /// If `self` is case `Real`, returns the floating point value. Otherwise,
-    /// returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_f64(&self) -> FromSqlResult<f64> {
         match *self {
@@ -69,7 +69,7 @@ impl<'a> ValueRef<'a> {
 
     /// If `self` is case `Null` returns None.
     /// If `self` is case `Real`, returns the floating point value.
-    /// Otherwise, returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// Otherwise, returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_f64_or_null(&self) -> FromSqlResult<Option<f64>> {
         match *self {
@@ -80,33 +80,29 @@ impl<'a> ValueRef<'a> {
     }
 
     /// If `self` is case `Text`, returns the string value. Otherwise, returns
-    /// [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_str(&self) -> FromSqlResult<&'a str> {
         match *self {
-            ValueRef::Text(t) => {
-                std::str::from_utf8(t).map_err(|e| FromSqlError::Other(Box::new(e)))
-            }
+            ValueRef::Text(t) => Ok(std::str::from_utf8(t)?),
             _ => Err(FromSqlError::InvalidType),
         }
     }
 
     /// If `self` is case `Null` returns None.
     /// If `self` is case `Text`, returns the string value.
-    /// Otherwise, returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// Otherwise, returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_str_or_null(&self) -> FromSqlResult<Option<&'a str>> {
         match *self {
             ValueRef::Null => Ok(None),
-            ValueRef::Text(t) => std::str::from_utf8(t)
-                .map_err(|e| FromSqlError::Other(Box::new(e)))
-                .map(Some),
+            ValueRef::Text(t) => Ok(Some(std::str::from_utf8(t)?)),
             _ => Err(FromSqlError::InvalidType),
         }
     }
 
     /// If `self` is case `Blob`, returns the byte slice. Otherwise, returns
-    /// [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_blob(&self) -> FromSqlResult<&'a [u8]> {
         match *self {
@@ -117,7 +113,7 @@ impl<'a> ValueRef<'a> {
 
     /// If `self` is case `Null` returns None.
     /// If `self` is case `Blob`, returns the byte slice.
-    /// Otherwise, returns [`Err(Error::InvalidColumnType)`](crate::Error::InvalidColumnType).
+    /// Otherwise, returns [`Err(FromSqlError::InvalidType)`](FromSqlError::InvalidType).
     #[inline]
     pub fn as_blob_or_null(&self) -> FromSqlResult<Option<&'a [u8]>> {
         match *self {
@@ -150,20 +146,19 @@ impl<'a> ValueRef<'a> {
     }
 }
 
-impl From<ValueRef<'_>> for Value {
+impl TryFrom<ValueRef<'_>> for Value {
+    type Error = FromSqlError;
+
     #[inline]
     #[track_caller]
-    fn from(borrowed: ValueRef<'_>) -> Value {
-        match borrowed {
-            ValueRef::Null => Value::Null,
-            ValueRef::Integer(i) => Value::Integer(i),
-            ValueRef::Real(r) => Value::Real(r),
-            ValueRef::Text(s) => {
-                let s = std::str::from_utf8(s).expect("invalid UTF-8");
-                Value::Text(s.to_string())
-            }
-            ValueRef::Blob(b) => Value::Blob(b.to_vec()),
-        }
+    fn try_from(borrowed: ValueRef<'_>) -> Result<Self, Self::Error> {
+        Ok(match borrowed {
+            ValueRef::Null => Self::Null,
+            ValueRef::Integer(i) => Self::Integer(i),
+            ValueRef::Real(r) => Self::Real(r),
+            ValueRef::Text(s) => Self::Text(std::str::from_utf8(s)?.to_owned()),
+            ValueRef::Blob(b) => Self::Blob(b.to_vec()),
+        })
     }
 }
 
@@ -183,7 +178,7 @@ impl<'a> From<&'a [u8]> for ValueRef<'a> {
 
 impl<'a> From<&'a Value> for ValueRef<'a> {
     #[inline]
-    fn from(value: &'a Value) -> ValueRef<'a> {
+    fn from(value: &'a Value) -> Self {
         match *value {
             Value::Null => ValueRef::Null,
             Value::Integer(i) => ValueRef::Integer(i),
@@ -194,12 +189,12 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
     }
 }
 
-impl<'a, T> From<Option<T>> for ValueRef<'a>
+impl<T> From<Option<T>> for ValueRef<'_>
 where
-    T: Into<ValueRef<'a>>,
+    T: Into<Self>,
 {
     #[inline]
-    fn from(s: Option<T>) -> ValueRef<'a> {
+    fn from(s: Option<T>) -> Self {
         match s {
             Some(x) => x.into(),
             None => ValueRef::Null,
@@ -213,57 +208,61 @@ where
     feature = "vtab",
     feature = "preupdate_hook"
 ))]
-impl<'a> ValueRef<'a> {
-    pub(crate) unsafe fn from_value(value: *mut crate::ffi::sqlite3_value) -> ValueRef<'a> {
+impl ValueRef<'_> {
+    pub(crate) unsafe fn from_value(value: *mut crate::ffi::sqlite3_value) -> Self {
         use crate::ffi;
-        use std::slice::from_raw_parts;
+        use crate::util::from_raw_parts;
 
-        match ffi::sqlite3_value_type(value) {
-            ffi::SQLITE_NULL => ValueRef::Null,
-            ffi::SQLITE_INTEGER => ValueRef::Integer(ffi::sqlite3_value_int64(value)),
-            ffi::SQLITE_FLOAT => ValueRef::Real(ffi::sqlite3_value_double(value)),
-            ffi::SQLITE_TEXT => {
-                let text = ffi::sqlite3_value_text(value);
-                let len = ffi::sqlite3_value_bytes(value);
-                assert!(
-                    !text.is_null(),
-                    "unexpected SQLITE_TEXT value type with NULL data"
-                );
-                let s = from_raw_parts(text.cast::<u8>(), len as usize);
-                ValueRef::Text(s)
-            }
-            ffi::SQLITE_BLOB => {
-                let (blob, len) = (
-                    ffi::sqlite3_value_blob(value),
-                    ffi::sqlite3_value_bytes(value),
-                );
-
-                assert!(
-                    len >= 0,
-                    "unexpected negative return from sqlite3_value_bytes"
-                );
-                if len > 0 {
+        unsafe {
+            match ffi::sqlite3_value_type(value) {
+                ffi::SQLITE_NULL => ValueRef::Null,
+                ffi::SQLITE_INTEGER => ValueRef::Integer(ffi::sqlite3_value_int64(value)),
+                ffi::SQLITE_FLOAT => ValueRef::Real(ffi::sqlite3_value_double(value)),
+                ffi::SQLITE_TEXT => {
+                    let text = ffi::sqlite3_value_text(value);
+                    let len = ffi::sqlite3_value_bytes(value);
                     assert!(
-                        !blob.is_null(),
-                        "unexpected SQLITE_BLOB value type with NULL data"
+                        !text.is_null(),
+                        "unexpected SQLITE_TEXT value type with NULL data"
                     );
-                    ValueRef::Blob(from_raw_parts(blob.cast::<u8>(), len as usize))
-                } else {
-                    // The return value from sqlite3_value_blob() for a zero-length BLOB
-                    // is a NULL pointer.
-                    ValueRef::Blob(&[])
+                    let s = from_raw_parts(text.cast::<u8>(), len);
+                    ValueRef::Text(s)
                 }
+                ffi::SQLITE_BLOB => {
+                    let (blob, len) = (
+                        ffi::sqlite3_value_blob(value),
+                        ffi::sqlite3_value_bytes(value),
+                    );
+
+                    assert!(
+                        len >= 0,
+                        "unexpected negative return from sqlite3_value_bytes"
+                    );
+                    if len > 0 {
+                        assert!(
+                            !blob.is_null(),
+                            "unexpected SQLITE_BLOB value type with NULL data"
+                        );
+                        ValueRef::Blob(from_raw_parts(blob.cast::<u8>(), len))
+                    } else {
+                        // The return value from sqlite3_value_blob() for a zero-length BLOB
+                        // is a NULL pointer.
+                        ValueRef::Blob(&[])
+                    }
+                }
+                _ => unreachable!("sqlite3_value_type returned invalid value"),
             }
-            _ => unreachable!("sqlite3_value_type returned invalid value"),
         }
     }
 
-    // TODO sqlite3_value_nochange // 3.22.0 & VTab xUpdate
     // TODO sqlite3_value_frombind // 3.28.0
 }
 
 #[cfg(test)]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use super::ValueRef;
     use crate::types::FromSqlResult;
 
@@ -331,5 +330,19 @@ mod test {
         assert!(ValueRef::Integer(1).as_bytes_or_null().is_err());
         assert_eq!(ValueRef::Blob(b"").as_bytes_or_null(), Ok(Some(&b""[..])));
         Ok(())
+    }
+    #[test]
+    fn from_value() {
+        use crate::types::Value;
+        assert_eq!(
+            ValueRef::from(&Value::Text("".to_owned())),
+            ValueRef::Text(b"")
+        );
+        assert_eq!(ValueRef::from(&Value::Blob(vec![])), ValueRef::Blob(b""));
+    }
+    #[test]
+    fn from_option() {
+        assert_eq!(ValueRef::from(None as Option<&str>), ValueRef::Null);
+        assert_eq!(ValueRef::from(Some("")), ValueRef::Text(b""));
     }
 }

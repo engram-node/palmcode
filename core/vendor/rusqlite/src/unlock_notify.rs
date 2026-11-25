@@ -1,7 +1,6 @@
 //! [Unlock Notification](http://sqlite.org/unlock_notify.html)
 
-use std::os::raw::c_int;
-use std::os::raw::c_void;
+use std::ffi::{c_int, c_void};
 use std::panic::catch_unwind;
 use std::sync::{Condvar, Mutex};
 
@@ -12,10 +11,9 @@ struct UnlockNotification {
     mutex: Mutex<bool>, // Mutex to protect structure
 }
 
-#[allow(clippy::mutex_atomic)]
 impl UnlockNotification {
-    fn new() -> UnlockNotification {
-        UnlockNotification {
+    fn new() -> Self {
+        Self {
             cond: Condvar::new(),
             mutex: Mutex::new(false),
         }
@@ -42,17 +40,20 @@ fn unpoison<T>(r: Result<T, std::sync::PoisonError<T>>) -> T {
 
 /// This function is an unlock-notify callback
 unsafe extern "C" fn unlock_notify_cb(ap_arg: *mut *mut c_void, n_arg: c_int) {
-    use std::slice::from_raw_parts;
-    let args = from_raw_parts(ap_arg as *const &UnlockNotification, n_arg as usize);
-    for un in args {
-        drop(catch_unwind(std::panic::AssertUnwindSafe(|| un.fired())));
+    unsafe {
+        let args = crate::util::from_raw_parts(ap_arg as *const &UnlockNotification, n_arg);
+        for un in args {
+            drop(catch_unwind(|| un.fired()));
+        }
     }
 }
 
 pub unsafe fn is_locked(db: *mut ffi::sqlite3, rc: c_int) -> bool {
-    rc == ffi::SQLITE_LOCKED_SHAREDCACHE
-        || (rc & 0xFF) == ffi::SQLITE_LOCKED
-            && ffi::sqlite3_extended_errcode(db) == ffi::SQLITE_LOCKED_SHAREDCACHE
+    unsafe {
+        rc == ffi::SQLITE_LOCKED_SHAREDCACHE
+            || (rc & 0xFF) == ffi::SQLITE_LOCKED
+                && ffi::sqlite3_extended_errcode(db) == ffi::SQLITE_LOCKED_SHAREDCACHE
+    }
 }
 
 /// This function assumes that an SQLite API call (either `sqlite3_prepare_v2()`
@@ -70,12 +71,10 @@ pub unsafe fn is_locked(db: *mut ffi::sqlite3, rc: c_int) -> bool {
 #[cfg(feature = "unlock_notify")]
 pub unsafe fn wait_for_unlock_notify(db: *mut ffi::sqlite3) -> c_int {
     let un = UnlockNotification::new();
-    /* Register for an unlock-notify callback. */
-    let rc = ffi::sqlite3_unlock_notify(
-        db,
-        Some(unlock_notify_cb),
-        &un as *const UnlockNotification as *mut c_void,
-    );
+    let rc = unsafe {
+        /* Register for an unlock-notify callback. */
+        ffi::sqlite3_unlock_notify(db, Some(unlock_notify_cb), &raw const un as *mut c_void)
+    };
     debug_assert!(
         rc == ffi::SQLITE_LOCKED || rc == ffi::SQLITE_LOCKED_SHAREDCACHE || rc == ffi::SQLITE_OK
     );
@@ -85,13 +84,20 @@ pub unsafe fn wait_for_unlock_notify(db: *mut ffi::sqlite3) -> c_int {
     rc
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use crate::{Connection, OpenFlags, Result, Transaction, TransactionBehavior};
     use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::time;
 
+    #[cfg_attr(
+        all(target_family = "wasm", target_os = "unknown"),
+        ignore = "no thread on this platform"
+    )]
     #[test]
     fn test_unlock_notify() -> Result<()> {
         let url = "file::memory:?cache=shared";
@@ -109,8 +115,7 @@ mod test {
             tx2.commit().unwrap();
         });
         assert_eq!(tx.recv().unwrap(), 1);
-        let the_answer: i64 = db1.one_column("SELECT x FROM foo")?;
-        assert_eq!(42i64, the_answer);
+        assert_eq!(42, db1.one_column::<i64, _>("SELECT x FROM foo", [])?);
         child.join().unwrap();
         Ok(())
     }

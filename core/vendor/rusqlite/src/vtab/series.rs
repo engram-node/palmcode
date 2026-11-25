@@ -1,23 +1,27 @@
 //! Generate series virtual table.
 //!
 //! Port of C [generate series
-//! "function"](http://www.sqlite.org/cgi/src/finfo?name=ext/misc/series.c):
+//! "function"](https://sqlite.org/src/file/ext/misc/series.c):
 //! `https://www.sqlite.org/series.html`
+use std::borrow::Cow;
+use std::ffi::{CStr, c_int};
 use std::marker::PhantomData;
-use std::os::raw::c_int;
 
 use crate::ffi;
 use crate::types::Type;
 use crate::vtab::{
-    eponymous_only_module, Context, IndexConstraintOp, IndexInfo, VTab, VTabConfig, VTabConnection,
-    VTabCursor, Values,
+    Context, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig, VTabConnection,
+    VTabCursor,
 };
-use crate::{Connection, Error, Result};
+use crate::{Connection, Result};
 
-/// Register the "generate_series" module.
+const MODULE_NAME: &CStr = c"generate_series";
+
+/// Register the `generate_series` module.
 pub fn load_module(conn: &Connection) -> Result<()> {
+    const MODULE: Module<SeriesTab> = Module::eponymous_only_module();
     let aux: Option<()> = None;
-    conn.create_module("generate_series", eponymous_only_module::<SeriesTab>(), aux)
+    conn.create_module(MODULE_NAME, &MODULE, aux)
 }
 
 // Column numbers
@@ -29,7 +33,7 @@ const SERIES_COLUMN_STEP: c_int = 3;
 bitflags::bitflags! {
     #[derive(Clone, Copy)]
     #[repr(C)]
-    struct QueryPlanFlags: ::std::os::raw::c_int {
+    struct QueryPlanFlags: c_int {
         // start = $value  -- constraint exists
         const START = 1;
         // stop = $value   -- constraint exists
@@ -58,20 +62,26 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
 
     fn connect(
         db: &mut VTabConnection,
-        _aux: Option<&()>,
+        aux: Option<&()>,
+        module_name: &[u8],
+        _database_name: &[u8],
+        table_name: &[u8],
         _args: &[&[u8]],
-    ) -> Result<(String, SeriesTab)> {
-        let vtab = SeriesTab {
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        debug_assert_eq!(aux, None);
+        debug_assert_eq!(module_name, MODULE_NAME.to_bytes());
+        debug_assert_eq!(table_name, MODULE_NAME.to_bytes());
+        let vtab = Self {
             base: ffi::sqlite3_vtab::default(),
         };
         db.config(VTabConfig::Innocuous)?;
         Ok((
-            "CREATE TABLE x(value,start hidden,stop hidden,step hidden)".to_owned(),
+            Cow::Borrowed(c"CREATE TABLE x(value,start hidden,stop hidden,step hidden)"),
             vtab,
         ))
     }
 
-    fn best_index(&self, info: &mut IndexInfo) -> Result<()> {
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
         // The query plan bitmask
         let mut idx_num: QueryPlanFlags = QueryPlanFlags::empty();
         // Mask of unusable constraints
@@ -104,18 +114,14 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
             let mut constraint_usage = info.constraint_usage(*j);
             constraint_usage.set_argv_index(n_arg);
             constraint_usage.set_omit(true);
-            #[cfg(all(test, feature = "modern_sqlite"))]
             debug_assert_eq!(Ok("BINARY"), info.collation(*j));
         }
         if !(unusable_mask & !idx_num).is_empty() {
-            return Err(Error::SqliteFailure(
-                ffi::Error::new(ffi::SQLITE_CONSTRAINT),
-                None,
-            ));
+            return Ok(false);
         }
         if idx_num.contains(QueryPlanFlags::BOTH) {
             // Both start= and stop= boundaries are available.
-            #[allow(clippy::bool_to_int_with_if)]
+            #[expect(clippy::bool_to_int_with_if)]
             info.set_estimated_cost(f64::from(
                 2 - if idx_num.contains(QueryPlanFlags::STEP) {
                     1
@@ -151,15 +157,16 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
             info.set_estimated_rows(2_147_483_647);
         }
         info.set_idx_num(idx_num.bits());
-        Ok(())
+        Ok(true)
     }
 
     fn open(&mut self) -> Result<SeriesTabCursor<'_>> {
-        Ok(SeriesTabCursor::new())
+        Ok(SeriesTabCursor::default())
     }
 }
 
 /// A cursor for the Series virtual table
+#[derive(Default)]
 #[repr(C)]
 struct SeriesTabCursor<'vtab> {
     /// Base class. Must be first
@@ -179,23 +186,8 @@ struct SeriesTabCursor<'vtab> {
     phantom: PhantomData<&'vtab SeriesTab>,
 }
 
-impl SeriesTabCursor<'_> {
-    fn new<'vtab>() -> SeriesTabCursor<'vtab> {
-        SeriesTabCursor {
-            base: ffi::sqlite3_vtab_cursor::default(),
-            is_desc: false,
-            row_id: 0,
-            value: 0,
-            min_value: 0,
-            max_value: 0,
-            step: 0,
-            phantom: PhantomData,
-        }
-    }
-}
-#[allow(clippy::comparison_chain)]
 unsafe impl VTabCursor for SeriesTabCursor<'_> {
-    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Values<'_>) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         let mut idx_num = QueryPlanFlags::from_bits_truncate(idx_num);
         let mut i = 0;
         if idx_num.contains(QueryPlanFlags::START) {
@@ -222,7 +214,7 @@ unsafe impl VTabCursor for SeriesTabCursor<'_> {
             }
         } else {
             self.step = 1;
-        };
+        }
         for arg in args.iter() {
             if arg.data_type() == Type::Null {
                 // If any of the constraints have a NULL value, then return no rows.
@@ -269,7 +261,7 @@ unsafe impl VTabCursor for SeriesTabCursor<'_> {
             SERIES_COLUMN_STEP => self.step,
             _ => self.value,
         };
-        ctx.set_result(&x)
+        ctx.set_result(x)
     }
 
     fn rowid(&self) -> Result<i64> {
@@ -277,12 +269,15 @@ unsafe impl VTabCursor for SeriesTabCursor<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod test {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use crate::ffi;
     use crate::vtab::series;
     use crate::{Connection, Result};
-    use fallible_iterator::FallibleIterator;
+    use fallible_iterator::FallibleIterator as _;
 
     #[test]
     fn test_series_module() -> Result<()> {
